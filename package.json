@@ -1,0 +1,43 @@
+{
+  "name": "rschr",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "lint": "eslint .",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@embedpdf/core": "^2.15.0",
+    "@embedpdf/engines": "^2.15.0",
+    "@embedpdf/plugin-annotation": "^2.15.0",
+    "@embedpdf/plugin-document-manager": "^2.15.0",
+    "@embedpdf/plugin-history": "^2.15.0",
+    "@embedpdf/plugin-interaction-manager": "^2.15.0",
+    "@embedpdf/plugin-render": "^2.15.0",
+    "@embedpdf/plugin-scroll": "^2.15.0",
+    "@embedpdf/plugin-selection": "^2.15.0",
+    "@embedpdf/plugin-viewport": "^2.15.0",
+    "@embedpdf/plugin-zoom": "^2.15.0",
+    "pdfjs-dist": "^6.3.289",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
+    "react-markdown": "^10.1.0"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@types/node": "^24.13.3",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^6.1.1",
+    "eslint": "^10.10.0",
+    "eslint-plugin-react-hooks": "^7.1.1",
+    "eslint-plugin-react-refresh": "^0.5.6",
+    "globals": "^17.12.0",
+    "typescript": "^7",
+    "typescript-eslint": "^8.69.0",
+    "vite": "^8.3.0"
+  }
+}

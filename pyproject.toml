@@ -1,0 +1,21 @@
+[project]
+name = "rschr"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "aiofiles>=25.1.0",
+    "aiosqlite>=0.22.1",
+    "fastapi>=0.141.1",
+    "google-genai>=2.23.0",
+    "httpx>=0.28.1",
+    "pydantic>=2.13.5",
+    "pymupdf>=1.28.2",
+    "python-dotenv>=1.2.3",
+    "python-multipart>=0.0.32",
+    "uvicorn>=0.52.4",
+]
+
+[tool.pyright]
+extraPaths = ["backend"]
