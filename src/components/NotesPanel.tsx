@@ -19,8 +19,8 @@ interface NotesPanelProps {
   lastSavedTime?: string | null;
   onNoteChange: (content: string) => void;
   onManualSave?: (content?: string) => void;
-  onTitleChange: (newTitle: string) => void;
   onTagChange: (newTag: string) => void;
+  dragHandle?: React.ReactNode;
 }
 
 const PRESET_TAGS = ['General', 'NLP', 'Architecture', 'Foundations', 'Strategy', 'ML'];
@@ -65,8 +65,8 @@ const NotesPanelInner: React.FC<NotesPanelProps> = ({
   lastSavedTime,
   onNoteChange,
   onManualSave,
-  onTitleChange,
   onTagChange,
+  dragHandle,
 }) => {
   const [wordCount, setWordCount] = useState<number>(0);
   const [isTagMenuOpen, setIsTagMenuOpen] = useState<boolean>(false);
@@ -76,44 +76,7 @@ const NotesPanelInner: React.FC<NotesPanelProps> = ({
   const isInactive = !doc;
 
   const externalTitle = doc ? doc.note_title || baseName(doc.name) : '';
-  // Local draft: typing here re-renders only this panel. Commits propagate
-  // to App (debounced) so the sidebar/overview/viewer don't churn per
-  // keystroke — previously every keystroke rebuilt the whole workspace tree.
-  const [titleDraft, setTitleDraft] = useState(externalTitle);
-  const titleFocusedRef = useRef(false);
-  const titleCommitTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  // Sync draft on doc switch or external rename (sidebar/overview/viewer)
-  // while not editing. Pending commit for the previous doc is dropped —
-  // firing it would write the old title onto the newly active doc, since
-  // App resolves the target via activeDocIdRef.
-  useEffect(() => {
-    if (titleCommitTimer.current) clearTimeout(titleCommitTimer.current);
-    if (!titleFocusedRef.current) setTitleDraft(externalTitle);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [doc?.id, externalTitle]);
-
-  useEffect(() => {
-    return () => {
-      if (titleCommitTimer.current) clearTimeout(titleCommitTimer.current);
-    };
-  }, []);
-
-  const scheduleTitleCommit = (value: string) => {
-    if (titleCommitTimer.current) clearTimeout(titleCommitTimer.current);
-    if (!doc || !value.trim() || value === externalTitle) return;
-    titleCommitTimer.current = setTimeout(() => onTitleChange(value), 500);
-  };
-
-  const flushTitleCommit = () => {
-    if (titleCommitTimer.current) {
-      clearTimeout(titleCommitTimer.current);
-      titleCommitTimer.current = null;
-    }
-    if (doc && titleDraft.trim() && titleDraft !== externalTitle) {
-      onTitleChange(titleDraft);
-    }
-  };
+  const currentTitle = externalTitle;
 
   // Close tag menu on outside click
   useEffect(() => {
@@ -141,15 +104,9 @@ const NotesPanelInner: React.FC<NotesPanelProps> = ({
     }
   };
 
-  const currentTitle = titleDraft;
 
-  const handleTitleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
-    if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
-    if (e.key === 'Escape') {
-      setTitleDraft(externalTitle);
-      (e.target as HTMLInputElement).blur();
-    }
-  };
+
+
 
   const handleDownloadNote = () => {
     if (!doc) return;
@@ -184,15 +141,20 @@ const NotesPanelInner: React.FC<NotesPanelProps> = ({
       </div>
 
       <div className="notes-content">
-        <div className="notes-top">
-          <div className="crumbs">
-            <span>Notes</span>
-            <span className="crumb-sep">/</span>
-            <b id="crumbLabel" className="crumb-title" title={currentTitle}>
-              {currentTitle || '—'}
-            </b>
+        <div className="notes-head" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '12px' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+            {dragHandle && <span className="drag-handle-wrapper">{dragHandle}</span>}
+            <div className="notes-meta">
+              <div className="crumbs">
+                <span>Notes</span>
+                <span className="crumb-sep">/</span>
+                <b id="crumbLabel" className="crumb-title" title={currentTitle} style={{ fontSize: '14px' }}>
+                  {currentTitle || '—'}
+                </b>
+              </div>
+            </div>
           </div>
-          <div className="notes-actions">
+          <div className="notes-actions" style={{ display: 'flex', gap: '8px' }}>
             <button
               className={`icon-btn small save-btn ${saveStatus === 'saved' ? 'is-saved' : ''}`}
               id="saveBtn"
@@ -213,25 +175,6 @@ const NotesPanelInner: React.FC<NotesPanelProps> = ({
             </button>
           </div>
         </div>
-
-        <input
-          className="note-title-input"
-          id="noteTitle"
-          value={currentTitle}
-          placeholder="Untitled note"
-          onChange={(e) => {
-            setTitleDraft(e.target.value);
-            scheduleTitleCommit(e.target.value);
-          }}
-          onFocus={() => {
-            titleFocusedRef.current = true;
-          }}
-          onBlur={() => {
-            titleFocusedRef.current = false;
-            flushTitleCommit();
-          }}
-          onKeyDown={handleTitleKeyDown}
-        />
 
         <div className="meta">
           <span className="date" id="noteDate">

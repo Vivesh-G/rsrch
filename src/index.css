@@ -199,7 +199,7 @@ body {
   display: flex;
   flex-direction: column;
   padding: var(--space-2);
-  gap: var(--space-2);
+  gap: var(--space-1);
   overflow: hidden;
 }
 
@@ -481,29 +481,28 @@ body {
   overflow: hidden;
 }
 
-/* 2px visible edge hint */
+/* 3px visible edge hint */
 .sidebar.collapsed::after {
   content: "";
   position: absolute;
   top: 0;
   bottom: 0;
   right: 0;
-  width: 2px;
+  width: 3px;
   background: var(--border-strong);
-  opacity: 0.6;
+  opacity: 1;
   pointer-events: none;
 }
 
-/* Full-height invisible grab zone pinned to the leftmost screen edge,
-   so hovering anywhere along the left edge reveals the drawer —
-   not just the 2px peek in the middle 70%. */
+/* Full-height invisible grab zone pinned to the leftmost screen edge.
+   Positioned absolute because parent has transform. */
 .sidebar.collapsed::before {
   content: "";
-  position: fixed;
-  left: 0;
+  position: absolute;
+  left: 100%;
   top: 0;
   bottom: 0;
-  width: 14px;
+  width: 24px;
   background: transparent;
   z-index: 59;
 }

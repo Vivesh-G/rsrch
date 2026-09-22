@@ -11,6 +11,7 @@ interface ChatPanelProps {
   /** Title lookup for docs attached to a chat (may be deleted → null). */
   resolveDocTitle: (id: string) => string | null;
   style?: React.CSSProperties;
+  dragHandle?: React.ReactNode;
 }
 
 export const PERSISTED_CHAT_KEY = 'rschr-chat-id';
@@ -63,7 +64,7 @@ const MemoizedMessageList = React.memo(({ messages, isWaiting }: { messages: Cha
 // draft (it unmounts on close, so state resets naturally); past chats open
 // via the History view. Context = explicit attach chips, so a chat started
 // on one PDF keeps working when continued on another.
-export const ChatPanel = React.memo(({ activeDocId, activeDocTitle, resolveDocTitle, style }: ChatPanelProps) => {
+const ChatPanelInner = ({ activeDocId, activeDocTitle, resolveDocTitle, style, dragHandle }: ChatPanelProps) => {
   const [view, setView] = useState<'chat' | 'history'>('chat');
   const [chats, setChats] = useState<ChatSession[]>([]);
   const [activeChatId, setActiveChatId] = useState<string | null>(null);
@@ -224,27 +225,30 @@ export const ChatPanel = React.memo(({ activeDocId, activeDocTitle, resolveDocTi
   const headerTitle = activeChat ? activeChat.title : 'New chat';
 
   return (
-    <aside className="chat-panel" style={style}>
+    <aside className="chat-panel" id="chatPanel" style={style}>
       <div className="chat-container">
         <div className="chat-header">
-          {view === 'history' ? (
-            <>
-              <button className="icon-btn small" title="Back to chat" onClick={() => { setView('chat'); setConfirmDeleteId(null); }} type="button">‹</button>
-              <h3>Chat history</h3>
-            </>
-          ) : (
-            <>
-              <h3 title={headerTitle}>{headerTitle}</h3>
-              <div className="chat-header-actions">
-                <button className="icon-btn small" title="View past chats" onClick={() => { setView('history'); setConfirmDeleteId(null); }} type="button">
-                  <IconDoc size={13} />
-                </button>
-                <button className="icon-btn small" title="Start a new blank chat" onClick={startBlank} type="button">
-                  <IconPlus size={12} />
-                </button>
-              </div>
-            </>
-          )}
+          <div className="chat-header-left" style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+            {dragHandle && <span className="drag-handle-wrapper">{dragHandle}</span>}
+            {view === 'history' ? (
+              <>
+                <button className="icon-btn small" title="Back to chat" onClick={() => { setView('chat'); setConfirmDeleteId(null); }} type="button">‹</button>
+                <h3>Chat history</h3>
+              </>
+            ) : (
+              <>
+                <h3 title={headerTitle}>{headerTitle}</h3>
+                <div className="chat-header-actions">
+                  <button className="icon-btn small" title="View past chats" onClick={() => { setView('history'); setConfirmDeleteId(null); }} type="button">
+                    <IconDoc size={13} />
+                  </button>
+                  <button className="icon-btn small" title="Start a new blank chat" onClick={startBlank} type="button">
+                    <IconPlus size={12} />
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
         </div>
 
         {view === 'history' ? (
@@ -319,4 +323,16 @@ export const ChatPanel = React.memo(({ activeDocId, activeDocTitle, resolveDocTi
       </div>
     </aside>
   );
-});
+};
+
+export const ChatPanel = React.memo(
+  ChatPanelInner,
+  (prev, next) => {
+    return (
+      prev.activeDocId === next.activeDocId &&
+      prev.activeDocTitle === next.activeDocTitle &&
+      prev.resolveDocTitle === next.resolveDocTitle &&
+      prev.style === next.style
+    );
+  }
+);

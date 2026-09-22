@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { IconSun, IconMoon, IconMaximize, IconMinimize, IconKeyboard, IconSearch, IconPlus, IconChat } from './Icons';
+import { IconSun, IconMoon, IconMaximize, IconMinimize, IconKeyboard, IconSearch, IconPlus, IconChat, IconLogo } from './Icons';
 import { KeyboardShortcutsModal } from './KeyboardShortcutsModal';
 
 interface TopBarProps {
@@ -101,8 +101,9 @@ const TopBarInner: React.FC<TopBarProps> = ({
     <>
       <header className="topbar">
         <div className="topbar-left">
-          <div className="brand-text" onClick={onSelectOverview}>
-            <strong>Rsrch</strong>
+          <div className="brand-text" onClick={onSelectOverview} style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <IconLogo size={28} />
+            <strong style={{ fontSize: '18px' }}>Rsrch</strong>
           </div>
         </div>
 

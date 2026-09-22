@@ -48,6 +48,7 @@ interface DocViewerProps {
   onDropFiles: (files: FileList) => void;
   onAddToNote?: (quoteText: string, pageNumber: number) => void;
   onRenameDoc?: (docId: string, title: string) => void;
+  dragHandle?: React.ReactNode;
 }
 
 const baseName = (n?: string) => (n || '').replace(/\.pdf$/i, '');
@@ -507,6 +508,7 @@ const LoadedViewer: React.FC<DocViewerProps> = ({
   onDropFiles,
   onAddToNote,
   onRenameDoc,
+  dragHandle,
 }) => {
   const docViewRef = useRef<HTMLDivElement>(null);
   const [renaming, setRenaming] = useState(false);
@@ -756,16 +758,18 @@ const LoadedViewer: React.FC<DocViewerProps> = ({
   return (
     <div id="docView" className="doc-view" ref={docViewRef}>
       <div className="viewer-toolbar">
-        <div className="file-name" title={renaming ? `Source: ${doc.name}` : `Source: ${doc.name} (click to rename)`}>
-          <IconDoc size={13} className="viewer-doc-icon" />
-          {renaming ? (
-            <input
-              className="inline-rename-input"
-              value={renameValue}
-              autoFocus
-              onFocus={(e) => e.target.select()}
-              onChange={(e) => setRenameValue(e.target.value)}
-              onBlur={() => {
+        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+          {dragHandle && <span className="drag-handle-wrapper">{dragHandle}</span>}
+          <div className="file-name" title={renaming ? `Source: ${doc.name}` : `Source: ${doc.name} (click to rename)`}>
+            <IconDoc size={13} className="viewer-doc-icon" />
+            {renaming ? (
+              <input
+                className="inline-rename-input"
+                value={renameValue}
+                autoFocus
+                onFocus={(e) => e.target.select()}
+                onChange={(e) => setRenameValue(e.target.value)}
+                onBlur={() => {
                 setRenaming(false);
                 if (renameValue.trim() && renameValue.trim() !== displayTitle) {
                   onRenameDoc?.(doc.id, renameValue);
@@ -792,6 +796,7 @@ const LoadedViewer: React.FC<DocViewerProps> = ({
               {displayTitle}
             </span>
           )}
+          </div>
         </div>
 
         <div className="page-ctrl">

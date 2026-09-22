@@ -12,11 +12,12 @@ interface WorkspaceOverviewProps {
   onDeleteDoc?: (wsId: string, docId: string) => void;
   onDeleteWorkspace?: (wsId: string) => void;
   onRenameDoc?: (docId: string, title: string) => void;
+  dragHandle?: React.ReactNode;
 }
 
 const baseName = (n?: string) => (n || '').replace(/\.pdf$/i, '');
 
-export const WorkspaceOverview: React.FC<WorkspaceOverviewProps> = React.memo(({
+const WorkspaceOverviewInner: React.FC<WorkspaceOverviewProps> = ({
   workspace,
   searchQuery,
   notesCache,
@@ -25,6 +26,7 @@ export const WorkspaceOverview: React.FC<WorkspaceOverviewProps> = React.memo(({
   onDeleteDoc,
   onDeleteWorkspace,
   onRenameDoc,
+  dragHandle,
 }) => {
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState('');
@@ -54,11 +56,14 @@ export const WorkspaceOverview: React.FC<WorkspaceOverviewProps> = React.memo(({
 
   return (
     <div id="wsOverview" className="ws-overview">
-      <div className="ws-ov-head">
-        <div>
-          <h2 id="wsTitle">{workspace?.name || 'Workspace'}</h2>
-          <div className="muted" id="wsSub">
-            {docCount} document{docCount !== 1 ? 's' : ''}
+      <div className="ws-ov-head" style={{ position: 'relative' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+          {dragHandle && <span className="drag-handle-wrapper">{dragHandle}</span>}
+          <div>
+            <h2 id="wsTitle">{workspace?.name || 'Workspace'}</h2>
+            <div className="muted" id="wsSub">
+              {docCount} document{docCount !== 1 ? 's' : ''}
+            </div>
           </div>
         </div>
         <div className="ws-ov-actions">
@@ -170,5 +175,16 @@ export const WorkspaceOverview: React.FC<WorkspaceOverviewProps> = React.memo(({
       )}
     </div>
   );
-});
+};
+
+export const WorkspaceOverview = React.memo(
+  WorkspaceOverviewInner,
+  (prev, next) => {
+    return (
+      prev.workspace === next.workspace &&
+      prev.searchQuery === next.searchQuery &&
+      prev.notesCache === next.notesCache
+    );
+  }
+);
 

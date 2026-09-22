@@ -9,6 +9,8 @@ import { NotesPanel } from './components/NotesPanel';
 import { ChatPanel, PERSISTED_CHAT_KEY } from './components/ChatPanel';
 import { ConfirmModal, NewWorkspaceModal } from './components/Modals';
 import { ErrorBoundary } from './components/ErrorBoundary';
+import { Reorder, useDragControls } from 'framer-motion';
+import { IconDragHandle } from './components/Icons';
 import './index.css';
 
 // Code-split the heavy PDF viewer (pdfjs-dist ~800KB) so initial load
@@ -57,6 +59,48 @@ function usePersistentState<T>(key: string, initial: T) {
   return [value, setValue] as const;
 }
 
+interface PanelWrapperProps {
+  id: string;
+  style?: React.CSSProperties;
+  className?: string;
+  resizer?: React.ReactNode;
+  resizerPosition?: 'left' | 'right';
+  children: (dragHandle: React.ReactNode) => React.ReactNode;
+}
+
+const PanelWrapper = React.forwardRef<HTMLLIElement, PanelWrapperProps>(({ id, style, children, className, resizer, resizerPosition }, ref) => {
+  const controls = useDragControls();
+  const dragHandleNode = (
+    <div
+      role="button"
+      tabIndex={0}
+      aria-label={`Reorder ${id} panel`}
+      onPointerDown={(e) => controls.start(e)}
+      style={{ display: 'flex', touchAction: 'none', cursor: 'grab' }}
+    >
+      <IconDragHandle />
+    </div>
+  );
+  return (
+    <Reorder.Item
+      value={id}
+      id={id}
+      ref={ref}
+      style={{ ...style, position: 'relative', height: '100%', display: 'flex', flexDirection: 'row' }}
+      dragListener={false}
+      dragControls={controls}
+      className={className}
+      layout="position"
+    >
+      {resizerPosition === 'left' && resizer}
+      <div style={{ flex: 1, display: 'flex', minWidth: 0, flexDirection: 'column', height: '100%' }}>
+        {children(dragHandleNode)}
+      </div>
+      {resizerPosition === 'right' && resizer}
+    </Reorder.Item>
+  );
+});
+
 export const App: React.FC = () => {
   const [workspaces, setWorkspaces] = useState<Workspace[]>([
     {
@@ -83,6 +127,53 @@ export const App: React.FC = () => {
   const [notesWidth, setNotesWidth] = usePersistentState<number>('rschr-notesw', 400);
   const [chatWidth, setChatWidth] = usePersistentState<number>('rschr-chatw', 300);
   const [isChatOpen, setIsChatOpen] = usePersistentState<boolean>('rschr-chat-open', false);
+  const PANEL_IDS = useMemo(() => ['viewer', 'chat', 'notes'] as string[], []);
+  const [panelOrderRaw, setPanelOrder] = usePersistentState<string[]>('rschr-panel-order', ['viewer', 'chat', 'notes']);
+  // Sanitize persisted order: drop unknowns/'sidebar', dedupe, append missing
+  // so corrupt localStorage can never render an empty or partial layout.
+  const panelOrder = useMemo(() => {
+    const seen = new Set<string>();
+    const clean = (Array.isArray(panelOrderRaw) ? panelOrderRaw : []).filter((p) => {
+      if (!PANEL_IDS.includes(p) || seen.has(p)) return false;
+      seen.add(p);
+      return true;
+    });
+    for (const id of PANEL_IDS) if (!seen.has(id)) clean.push(id);
+    return clean;
+  }, [panelOrderRaw, PANEL_IDS]);
+  // Visible subset must match rendered Items 1:1 — Group `values` + map must
+  // use this, never the full order (hidden chat would otherwise desync and
+  // onReorder would persist a list missing 'chat', losing it permanently).
+  const visibleOrder = useMemo(
+    () => panelOrder.filter((p) => p !== 'chat' || isChatOpen),
+    [panelOrder, isChatOpen]
+  );
+  // Merge a visible-only reorder back into the full order, preserving the
+  // previous index of hidden panels so reopening lands where it was.
+  const handleReorder = useCallback((nextVisible: string[]) => {
+    setPanelOrder((prev) => {
+      const valid = ['viewer', 'chat', 'notes'];
+      const seen = new Set<string>();
+      const base = (Array.isArray(prev) ? prev : []).filter((p) => {
+        if (!valid.includes(p) || seen.has(p)) return false;
+        seen.add(p);
+        return true;
+      });
+      const hidden = base.filter((p) => !nextVisible.includes(p));
+      if (hidden.length === 0) return nextVisible.filter((p) => valid.includes(p));
+      const result = nextVisible.filter((p) => valid.includes(p));
+      for (const h of hidden) {
+        const oldIdx = base.indexOf(h);
+        result.splice(oldIdx < 0 ? result.length : Math.min(oldIdx, result.length), 0, h);
+      }
+      return result;
+    });
+  }, []);
+  
+  const sidebarWidthRef = useRef(sidebarWidth);
+  sidebarWidthRef.current = sidebarWidth;
+  const chatWidthRef = useRef(chatWidth);
+  chatWidthRef.current = chatWidth;
   // Deferred query lets the search input stay at 60fps while heavy
   // sidebar/overview filtering renders at lower priority.
   const deferredSearchQuery = useDeferredValue(searchQuery);
@@ -106,8 +197,6 @@ export const App: React.FC = () => {
     return () => {
       if (resizeRafRef.current) cancelAnimationFrame(resizeRafRef.current);
       if (noteSaveTimerRef.current) clearTimeout(noteSaveTimerRef.current);
-      if (titleSaveTimerRef.current) clearTimeout(titleSaveTimerRef.current);
-      if (tagSaveTimerRef.current) clearTimeout(tagSaveTimerRef.current);
       if (saveTimeoutRef.current) clearTimeout(saveTimeoutRef.current);
     };
   }, []);
@@ -461,27 +550,6 @@ export const App: React.FC = () => {
     queueMicrotask(() => api.updateDocument(docId, { bookmarked: nextBm }).catch(() => {}));
   }, []);
 
-  const handleTitleChange = useCallback(
-    (newTitle: string) => {
-      const id = activeDocIdRef.current;
-      if (!id) return;
-      setWorkspaces((prev) =>
-        prev.map((w) => ({
-          ...w,
-          docs: w.docs.map((d) => (d.id === id ? { ...d, note_title: newTitle } : d)),
-        }))
-      );
-      if (titleSaveTimerRef.current) clearTimeout(titleSaveTimerRef.current);
-      titleSaveTimerRef.current = setTimeout(() => {
-        api.updateDocument(id, { note_title: newTitle }).catch(() => {});
-      }, 500);
-    },
-    []
-  );
-
-  // Rename any doc (sidebar / overview / viewer toolbar). Unlike
-  // handleTitleChange (per-keystroke, debounced), commits are discrete
-  // (Enter/blur) so the save goes out immediately.
   const handleRenameDoc = useCallback((docId: string, newTitle: string) => {
     const trimmed = newTitle.trim();
     if (!docId || !trimmed) return;
@@ -611,105 +679,68 @@ export const App: React.FC = () => {
 
   // Resizing Logic — rAF-throttled so mousemove (100+ Hz) commits at
   // most one React render per frame instead of one per event.
-  const scheduleWidth = useCallback(
-    (setter: (v: number) => void, compute: (rect: DOMRect, e: MouseEvent) => number) => {
-      return (moveEvent: MouseEvent) => {
+  const createResizeHandler = useCallback(
+    (
+      setWidth: React.Dispatch<React.SetStateAction<number>>,
+      widthRef: React.MutableRefObject<number>,
+      direction: 1 | -1,
+      min: number,
+      max: number
+    ) => (e: React.MouseEvent) => {
+      e.preventDefault();
+      document.body.style.cursor = 'col-resize';
+      document.body.style.userSelect = 'none';
+      const startX = e.clientX;
+      const startWidth = widthRef.current;
+
+      const onMouseMove = (moveEvent: MouseEvent) => {
         if (resizeRafRef.current) return;
-        const clientX = moveEvent.clientX;
         resizeRafRef.current = requestAnimationFrame(() => {
           resizeRafRef.current = 0;
-          if (!mainRef.current) return;
-          const mainRect = mainRef.current.getBoundingClientRect();
-          setter(compute(mainRect, { clientX } as MouseEvent));
+          const delta = (moveEvent.clientX - startX) * direction;
+          setWidth(Math.min(max, Math.max(min, startWidth + delta)));
         });
       };
+      const onMouseUp = () => {
+        if (resizeRafRef.current) cancelAnimationFrame(resizeRafRef.current);
+        resizeRafRef.current = 0;
+        document.body.style.cursor = '';
+        document.body.style.userSelect = '';
+        window.removeEventListener('mousemove', onMouseMove);
+        window.removeEventListener('mouseup', onMouseUp);
+      };
+      window.addEventListener('mousemove', onMouseMove);
+      window.addEventListener('mouseup', onMouseUp);
     },
     []
   );
+
+  const getResizeDirection = useCallback((panelId: string) => {
+    const viewerIndex = panelOrder.indexOf('viewer');
+    const panelIndex = panelOrder.indexOf(panelId);
+    return panelIndex < viewerIndex ? 1 : -1;
+  }, [panelOrder]);
 
   const handleResizer1MouseDown = useCallback(
     (e: React.MouseEvent) => {
       if (sidebarCollapsed) return;
-      e.preventDefault();
-      document.body.style.cursor = 'col-resize';
-      document.body.style.userSelect = 'none';
-
-      const onMouseMove = scheduleWidth(setSidebarWidth, (rect, ev) =>
-        Math.min(420, Math.max(180, ev.clientX - rect.left))
-      );
-
-      const onMouseUp = () => {
-        if (resizeRafRef.current) cancelAnimationFrame(resizeRafRef.current);
-        resizeRafRef.current = 0;
-        document.body.style.cursor = '';
-        document.body.style.userSelect = '';
-        window.removeEventListener('mousemove', onMouseMove);
-        window.removeEventListener('mouseup', onMouseUp);
-      };
-
-      window.addEventListener('mousemove', onMouseMove);
-      window.addEventListener('mouseup', onMouseUp);
+      createResizeHandler(setSidebarWidth, sidebarWidthRef, getResizeDirection('sidebar'), 180, 420)(e);
     },
-    [sidebarCollapsed, scheduleWidth]
+    [sidebarCollapsed, createResizeHandler, getResizeDirection]
   );
 
   const handleResizer2MouseDown = useCallback(
     (e: React.MouseEvent) => {
-      e.preventDefault();
-      document.body.style.cursor = 'col-resize';
-      document.body.style.userSelect = 'none';
-
-      const onMouseMove = scheduleWidth(setNotesWidth, (rect, ev) =>
-        Math.min(720, Math.max(280, rect.right - ev.clientX))
-      );
-
-      const onMouseUp = () => {
-        if (resizeRafRef.current) cancelAnimationFrame(resizeRafRef.current);
-        resizeRafRef.current = 0;
-        document.body.style.cursor = '';
-        document.body.style.userSelect = '';
-        window.removeEventListener('mousemove', onMouseMove);
-        window.removeEventListener('mouseup', onMouseUp);
-      };
-
-      window.addEventListener('mousemove', onMouseMove);
-      window.addEventListener('mouseup', onMouseUp);
+      createResizeHandler(setNotesWidth, notesWidthRef, getResizeDirection('notes'), 280, 720)(e);
     },
-    [scheduleWidth]
+    [createResizeHandler, getResizeDirection]
   );
 
   const handleResizerChatMouseDown = useCallback(
     (e: React.MouseEvent) => {
-      e.preventDefault();
-      document.body.style.cursor = 'col-resize';
-      document.body.style.userSelect = 'none';
-
-      const onMouseMove = (moveEvent: MouseEvent) => {
-        if (resizeRafRef.current) return;
-        const clientX = moveEvent.clientX;
-        resizeRafRef.current = requestAnimationFrame(() => {
-          resizeRafRef.current = 0;
-          if (!mainRef.current) return;
-          const mainRect = mainRef.current.getBoundingClientRect();
-          // Read current notes width from DOM to avoid stale closure
-          const newWidth = mainRect.right - clientX - notesWidthRef.current;
-          setChatWidth(Math.min(600, Math.max(250, newWidth)));
-        });
-      };
-
-      const onMouseUp = () => {
-        if (resizeRafRef.current) cancelAnimationFrame(resizeRafRef.current);
-        resizeRafRef.current = 0;
-        document.body.style.cursor = '';
-        document.body.style.userSelect = '';
-        window.removeEventListener('mousemove', onMouseMove);
-        window.removeEventListener('mouseup', onMouseUp);
-      };
-
-      window.addEventListener('mousemove', onMouseMove);
-      window.addEventListener('mouseup', onMouseUp);
+      createResizeHandler(setChatWidth, chatWidthRef, getResizeDirection('chat'), 250, 600)(e);
     },
-    []
+    [createResizeHandler, getResizeDirection]
   );
 
   // Stable render callbacks + memoized styles: previously every App
@@ -755,8 +786,8 @@ export const App: React.FC = () => {
     () => ({ width: sidebarCollapsed ? undefined : `${sidebarWidth}px` }),
     [sidebarCollapsed, sidebarWidth]
   );
-  const notesStyle = useMemo(() => ({ width: `${notesWidth}px` }), [notesWidth]);
-  const chatStyle = useMemo(() => ({ width: `${chatWidth}px` }), [chatWidth]);
+  const notesStyle = useMemo(() => ({ width: `${notesWidth}px`, height: '100%' }), [notesWidth]);
+  const chatStyle = useMemo(() => ({ width: `${chatWidth}px`, height: '100%' }), [chatWidth]);
   const noteContent = activeDocId ? notesCache[activeDocId] || '' : '';
   // Sidebar only scans note bodies while a query is active; otherwise hand
   // it a stable empty object so note keystrokes don't re-render the tree.
@@ -776,7 +807,8 @@ export const App: React.FC = () => {
       <div
         className={`main ${sidebarCollapsed ? 'sidebar-collapsed' : ''}`}
         id="main"
-        ref={mainRef}
+        ref={mainRef as any}
+        style={{ display: 'flex', flexDirection: 'row', width: '100%', overflow: 'hidden' }}
       >
         <Sidebar
           workspaces={workspaces}
@@ -796,75 +828,107 @@ export const App: React.FC = () => {
           onDeleteDoc={handleDeleteDoc2}
           onRenameDoc={handleRenameDoc}
         />
-
         <Resizer id="resizer1" onMouseDown={handleResizer1MouseDown} />
 
-        <section className="viewer" id="viewer">
-          {!activeDocId ? (
-            <WorkspaceOverview
-              workspace={activeWorkspace}
-              searchQuery={deferredSearchQuery}
-              notesCache={sidebarNotesCache}
-              onAddPdf={handleNewDocument}
-              onSelectDoc={handleSelectDoc}
-              onDeleteDoc={handleDeleteDoc2}
-              onDeleteWorkspace={requestDeleteWorkspace}
-              onRenameDoc={handleRenameDoc}
-            />
-          ) : (
-            <ErrorBoundary
-              resetKey={activeDocId}
-              fallback={<div className="pdf-loading-spinner"><span>This document couldn't be displayed.</span></div>}
-            >
-              <Suspense
-                fallback={<div className="pdf-loading-spinner"><span>Loading viewer…</span></div>}
-              >
-                <DocViewer
-                  doc={activeDoc}
-                  onToggleBookmark={handleToggleBookmark}
-                  onDeleteDoc={handleDeleteDoc1}
-                  onDropFiles={handleDropFiles}
-                  onAddToNote={handleAddToNoteFromPdf}
-                  onRenameDoc={handleRenameDoc}
-                />
-              </Suspense>
-            </ErrorBoundary>
-          )}
-        </section>
-
-        {isChatOpen && <Resizer id="resizer-chat" onMouseDown={handleResizerChatMouseDown} />}
-        {isChatOpen && (
-          <ErrorBoundary
-            resetKey={activeDocId}
-            fallback={<aside className="chat-panel" style={chatStyle}><div className="chat-empty">Chat unavailable.</div></aside>}
-          >
-            <ChatPanel
-              activeDocId={activeDocId}
-              activeDocTitle={activeDocName}
-              resolveDocTitle={resolveDocTitle}
-              style={chatStyle}
-            />
-          </ErrorBoundary>
-        )}
-
-        <Resizer id="resizer2" onMouseDown={handleResizer2MouseDown} />
-
-        <ErrorBoundary
-          resetKey={activeDocId}
-          fallback={<aside className="notes" id="notesPanel" style={notesStyle}><div className="notes-placeholder"><h3>Notes</h3><p>Notes failed to load for this document.</p></div></aside>}
+        <Reorder.Group
+          axis="x"
+          values={visibleOrder}
+          onReorder={handleReorder}
+          style={{ display: 'flex', flexDirection: 'row', flex: 1, minWidth: 0, height: '100%', padding: 0, margin: 0, listStyle: 'none' }}
         >
-          <NotesPanel
-            doc={activeDoc}
-            noteContent={noteContent}
-            style={notesStyle}
-            saveStatus={saveStatus}
-            lastSavedTime={lastSavedTime}
-            onNoteChange={handleNoteChange}
-            onManualSave={handleManualSave}
-            onTitleChange={handleTitleChange}
-            onTagChange={handleTagChange}
-          />
-        </ErrorBoundary>
+          {visibleOrder.map((panelId) => {
+            
+            const dir = getResizeDirection(panelId);
+            const resizerPosition = dir === 1 ? 'right' : 'left';
+            
+            if (panelId === 'viewer') {
+            return (
+              <PanelWrapper key="viewer" id="viewer" style={{ flex: '1 1 0', minWidth: 0, zIndex: 0 }} className="viewer" resizer={null}>
+                {(dragHandle: React.ReactNode) => (
+                  <div style={{ flex: 1, display: 'flex', flexDirection: 'column', height: '100%' }}>
+                    {!activeDocId ? (
+                      <WorkspaceOverview
+                        workspace={activeWorkspace}
+                        searchQuery={deferredSearchQuery}
+                        notesCache={sidebarNotesCache}
+                        onAddPdf={handleNewDocument}
+                        onSelectDoc={handleSelectDoc}
+                        onDeleteDoc={handleDeleteDoc2}
+                        onDeleteWorkspace={requestDeleteWorkspace}
+                        onRenameDoc={handleRenameDoc}
+                        dragHandle={dragHandle}
+                      />
+                    ) : (
+                      <ErrorBoundary
+                        resetKey={activeDocId}
+                        fallback={<div className="pdf-loading-spinner"><span>This document couldn't be displayed.</span></div>}
+                      >
+                        <Suspense
+                          fallback={<div className="pdf-loading-spinner"><span>Loading viewer…</span></div>}
+                        >
+                          <DocViewer
+                            doc={activeDoc}
+                            onToggleBookmark={handleToggleBookmark}
+                            onDeleteDoc={handleDeleteDoc1}
+                            onDropFiles={handleDropFiles}
+                            onAddToNote={handleAddToNoteFromPdf}
+                            onRenameDoc={handleRenameDoc}
+                            dragHandle={dragHandle}
+                          />
+                        </Suspense>
+                      </ErrorBoundary>
+                    )}
+                  </div>
+                )}
+              </PanelWrapper>
+            );
+          }
+          if (panelId === 'chat') {
+            return (
+              <PanelWrapper key="chat" id="chat" style={{ flexShrink: 0 }} resizer={<Resizer id="resizer-chat" onMouseDown={handleResizerChatMouseDown} />} resizerPosition={resizerPosition}>
+                {(dragHandle: React.ReactNode) => (
+                  <ErrorBoundary
+                    resetKey={activeDocId}
+                    fallback={<aside className="chat-panel" style={chatStyle}><div className="chat-empty">Chat unavailable.</div></aside>}
+                  >
+                    <ChatPanel
+                      activeDocId={activeDocId}
+                      activeDocTitle={activeDocName}
+                      resolveDocTitle={resolveDocTitle}
+                      style={chatStyle}
+                      dragHandle={dragHandle}
+                    />
+                  </ErrorBoundary>
+                )}
+              </PanelWrapper>
+            );
+          }
+          if (panelId === 'notes') {
+            return (
+              <PanelWrapper key="notes" id="notes" style={{ flexShrink: 0 }} resizer={<Resizer id="resizer2" onMouseDown={handleResizer2MouseDown} />} resizerPosition={resizerPosition}>
+                {(dragHandle: React.ReactNode) => (
+                  <ErrorBoundary
+                    resetKey={activeDocId}
+                    fallback={<aside className="notes" id="notesPanel" style={notesStyle}><div className="notes-placeholder"><h3>Notes</h3><p>Notes failed to load for this document.</p></div></aside>}
+                  >
+                    <NotesPanel
+                      doc={activeDoc}
+                      noteContent={noteContent}
+                      style={notesStyle}
+                      saveStatus={saveStatus}
+                      lastSavedTime={lastSavedTime}
+                      onNoteChange={handleNoteChange}
+                      onManualSave={handleManualSave}
+                      dragHandle={dragHandle}
+                    />
+                  </ErrorBoundary>
+                )}
+              </PanelWrapper>
+            );
+          }
+          return null;
+        })}
+        </Reorder.Group>
       </div>
 
       <input
