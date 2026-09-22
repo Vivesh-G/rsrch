@@ -1,5 +1,9 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
+import remarkMath from 'remark-math';
+import rehypeKatex from 'rehype-katex';
+import 'katex/dist/katex.min.css';
 import type { ChatMessage, ChatSession } from '../types';
 import { api } from '../services/api';
 import { IconPlus, IconClose, IconTrash, IconDoc } from './Icons';
@@ -45,7 +49,12 @@ const MemoizedMessageList = React.memo(({ messages, isWaiting }: { messages: Cha
       <div key={msg.id ?? `${msg.created_at}-${idx}`} className={`chat-bubble ${msg.role}`}>
         {msg.role === 'assistant' ? (
           <div className="chat-content markdown-body">
-            <ReactMarkdown>{msg.content}</ReactMarkdown>
+            <ReactMarkdown 
+              remarkPlugins={[remarkGfm, remarkMath]}
+              rehypePlugins={[rehypeKatex]}
+            >
+              {msg.content}
+            </ReactMarkdown>
           </div>
         ) : (
           <div className="chat-content">{msg.content}</div>
@@ -227,28 +236,28 @@ const ChatPanelInner = ({ activeDocId, activeDocTitle, resolveDocTitle, style, d
   return (
     <aside className="chat-panel" id="chatPanel" style={style}>
       <div className="chat-container">
-        <div className="chat-header">
-          <div className="chat-header-left" style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+        <div className="chat-header" style={{ justifyContent: 'space-between' }}>
+          <div className="chat-header-left" style={{ display: 'flex', alignItems: 'center', gap: '8px', minWidth: 0, flex: 1 }}>
             {dragHandle && <span className="drag-handle-wrapper">{dragHandle}</span>}
             {view === 'history' ? (
               <>
                 <button className="icon-btn small" title="Back to chat" onClick={() => { setView('chat'); setConfirmDeleteId(null); }} type="button">‹</button>
-                <h3>Chat history</h3>
+                <h3 style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>Chat history</h3>
               </>
             ) : (
-              <>
-                <h3 title={headerTitle}>{headerTitle}</h3>
-                <div className="chat-header-actions">
-                  <button className="icon-btn small" title="View past chats" onClick={() => { setView('history'); setConfirmDeleteId(null); }} type="button">
-                    <IconDoc size={13} />
-                  </button>
-                  <button className="icon-btn small" title="Start a new blank chat" onClick={startBlank} type="button">
-                    <IconPlus size={12} />
-                  </button>
-                </div>
-              </>
+              <h3 title={headerTitle} style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{headerTitle}</h3>
             )}
           </div>
+          {view !== 'history' && (
+            <div className="chat-header-actions">
+              <button className="icon-btn small" title="View past chats" onClick={() => { setView('history'); setConfirmDeleteId(null); }} type="button">
+                <IconDoc size={13} />
+              </button>
+              <button className="icon-btn small" title="Start a new blank chat" onClick={startBlank} type="button">
+                <IconPlus size={12} />
+              </button>
+            </div>
+          )}
         </div>
 
         {view === 'history' ? (

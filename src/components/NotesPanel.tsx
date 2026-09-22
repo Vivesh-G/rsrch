@@ -283,7 +283,6 @@ export const NotesPanel: React.FC<NotesPanelProps> = React.memo(
       prev.style === next.style &&
       prev.onNoteChange === next.onNoteChange &&
       prev.onManualSave === next.onManualSave &&
-      prev.onTitleChange === next.onTitleChange &&
       prev.onTagChange === next.onTagChange
     );
   }

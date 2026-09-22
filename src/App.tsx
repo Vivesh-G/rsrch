@@ -182,7 +182,6 @@ export const App: React.FC = () => {
   const mainRef = useRef<HTMLDivElement>(null);
   const resizeRafRef = useRef<number>(0);
   const noteSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const titleSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const tagSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const notesCacheRef = useRef<Record<string, string>>({});
   notesCacheRef.current = notesCache;
@@ -919,6 +918,7 @@ export const App: React.FC = () => {
                       lastSavedTime={lastSavedTime}
                       onNoteChange={handleNoteChange}
                       onManualSave={handleManualSave}
+                      onTagChange={handleTagChange}
                       dragHandle={dragHandle}
                     />
                   </ErrorBoundary>
