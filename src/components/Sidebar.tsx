@@ -1,7 +1,7 @@
 import React, { useMemo, useState } from 'react';
 import type { Workspace } from '../types';
 import { docMatchesQuery } from '../utils/search';
-import { IconDoc, IconTrash, IconPlus, IconChevronLeft, IconChevronRight } from './Icons';
+import { IconDoc, IconTrash, IconPlus, IconChevronLeft, IconChevronRight, IconLatex } from './Icons';
 
 interface SidebarProps {
   workspaces: Workspace[];
@@ -17,6 +17,7 @@ interface SidebarProps {
   onSelectDoc: (wsId: string, docId: string) => void;
   onCreateWorkspace: () => void;
   onAddDocToWorkspace: (wsId: string) => void;
+  onAddLatexDocToWorkspace?: (wsId: string) => void;
   onDeleteWorkspace?: (wsId: string) => void;
   onDeleteDoc?: (wsId: string, docId: string) => void;
   onRenameDoc?: (docId: string, title: string) => void;
@@ -38,6 +39,7 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
   onSelectDoc,
   onCreateWorkspace,
   onAddDocToWorkspace,
+  onAddLatexDocToWorkspace,
   onDeleteWorkspace,
   onDeleteDoc,
   onRenameDoc,
@@ -147,6 +149,18 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
                   </span>
                   <span className="ws-name">{w.name}</span>
                   <div className="ws-actions" onClick={(e) => e.stopPropagation()}>
+                    {onAddLatexDocToWorkspace && (
+                      <button
+                        className="ws-action-btn"
+                        title={`Add LaTeX Doc to ${w.name}`}
+                        aria-label={`Add LaTeX Doc to ${w.name}`}
+                        onClick={() => onAddLatexDocToWorkspace(w.id)}
+                        type="button"
+                        style={{ marginRight: 2 }}
+                      >
+                        <span style={{ fontSize: '10px', fontWeight: 'bold' }}>T</span>
+                      </button>
+                    )}
                     <button
                       className="ws-action-btn"
                       title={`Add PDF to ${w.name}`}
@@ -184,7 +198,11 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
                           className={`doc-item-row ${isDocActive ? 'active' : ''}`}
                           onClick={() => onSelectDoc(w.id, d.id)}
                         >
-                          <IconDoc size={13} className="doc-icon" />
+                          {d.doc_type === 'latex' ? (
+                            <IconLatex size={13} className="doc-icon" />
+                          ) : (
+                            <IconDoc size={13} className="doc-icon" />
+                          )}
                           {renamingId === d.id ? (
                             <input
                               className="inline-rename-input small"

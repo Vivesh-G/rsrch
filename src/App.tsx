@@ -138,7 +138,7 @@ export const App: React.FC = () => {
   const [pendingWsId, setPendingWsId] = useState<string | null>(null);
 
   // Save feedback state
-  const [saveStatus, setSaveStatus] = useState<'saved' | 'saving' | 'idle'>('idle');
+  const [saveStatus, setSaveStatus] = useState<'saved' | 'saving' | 'idle' | 'error'>('idle');
   const [lastSavedTime, setLastSavedTime] = useState<string | null>(null);
   const saveTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -581,6 +581,33 @@ export const App: React.FC = () => {
     setActiveDocId(docId);
   }, []);
 
+  const handleAddLatexDoc = useCallback(async (targetWsId: string) => {
+    try {
+      const doc = await api.createLatexDocument(targetWsId, "New LaTeX Document");
+      
+      setWorkspaces((prev) =>
+        prev.map((w) => {
+          if (w.id === targetWsId) {
+            return {
+              ...w,
+              expanded: true,
+              docs: [...w.docs, doc],
+            };
+          }
+          return w;
+        })
+      );
+      
+      // Notes cache will be populated automatically when it fetches, 
+      // but we could also pre-populate it here if we wanted.
+      
+      setActiveWsId(targetWsId);
+      setActiveDocId(doc.id);
+    } catch (err) {
+      console.warn("Failed to create LaTeX document:", err);
+    }
+  }, []);
+
   // Document Attribute Modifications — stable callbacks so memoized
   // DocViewer/Sidebar don't re-render; network writes are debounced.
   const handleToggleBookmark = useCallback((docId: string) => {
@@ -635,11 +662,30 @@ export const App: React.FC = () => {
     // network on every keystroke (was the main typing-jank source).
     setNotesCache((prev) => (prev[id] === newContent ? prev : { ...prev, [id]: newContent }));
     if (noteSaveTimerRef.current) clearTimeout(noteSaveTimerRef.current);
-    noteSaveTimerRef.current = setTimeout(() => {
+    noteSaveTimerRef.current = setTimeout(async () => {
       try {
         localStorage.setItem(`rsrch-note-${id}`, newContent);
       } catch {}
-      api.saveNote(id, newContent).catch(() => {});
+      try {
+        await api.saveNote(id, newContent);
+        const targetDoc = workspacesRef.current.flatMap((w) => w.docs).find((d) => d.id === id);
+        if (targetDoc?.doc_type === 'latex') {
+          const res = await api.compileDocument(id);
+          if (res?.status === 'success') {
+            window.dispatchEvent(new CustomEvent('rsrch:latex-compiled', { detail: { docId: id } }));
+            window.dispatchEvent(new CustomEvent('rsrch:latex-errors', { detail: { docId: id, errors: [] } }));
+          } else if (res?.status === 'error' || res?.status === 'timeout') {
+            window.dispatchEvent(new CustomEvent('rsrch:latex-errors', { detail: { docId: id, errors: res.diagnostics ?? res.errors ?? [] } }));
+            setSaveStatus('error');
+            if (saveTimeoutRef.current) clearTimeout(saveTimeoutRef.current);
+            saveTimeoutRef.current = setTimeout(() => {
+              setSaveStatus('idle');
+            }, 4000);
+          }
+        }
+      } catch (err) {
+        console.warn('Save or compile failed', err);
+      }
     }, 800);
   }, []);
 
@@ -693,9 +739,22 @@ export const App: React.FC = () => {
       localStorage.setItem(`rsrch-note-${id}`, contentToSave);
     } catch {}
 
+    let compileOk = true;
     try {
       await api.saveNote(id, contentToSave);
+      const targetDoc = workspacesRef.current.flatMap((w) => w.docs).find((d) => d.id === id);
+      if (targetDoc?.doc_type === 'latex') {
+        const res = await api.compileDocument(id);
+        if (res?.status === 'success') {
+          window.dispatchEvent(new CustomEvent('rsrch:latex-compiled', { detail: { docId: id } }));
+          window.dispatchEvent(new CustomEvent('rsrch:latex-errors', { detail: { docId: id, errors: [] } }));
+        } else if (res?.status === 'error' || res?.status === 'timeout') {
+          compileOk = false;
+          window.dispatchEvent(new CustomEvent('rsrch:latex-errors', { detail: { docId: id, errors: res.diagnostics ?? res.errors ?? [] } }));
+        }
+      }
     } catch (err) {
+      compileOk = false;
       console.warn('API saveNote failed, saved locally:', err);
     }
 
@@ -704,12 +763,12 @@ export const App: React.FC = () => {
       minute: '2-digit',
     });
     setLastSavedTime(timeStr);
-    setSaveStatus('saved');
+    setSaveStatus(compileOk ? 'saved' : 'error');
 
     if (saveTimeoutRef.current) clearTimeout(saveTimeoutRef.current);
     saveTimeoutRef.current = setTimeout(() => {
       setSaveStatus('idle');
-    }, 3000);
+    }, compileOk ? 3000 : 4000);
   }, []);
 
   // Global Ctrl + S keydown listener
@@ -1022,6 +1081,7 @@ export const App: React.FC = () => {
           onSelectDoc={handleSelectDoc}
           onCreateWorkspace={handleCreateWorkspace}
           onAddDocToWorkspace={handleAddDocToWorkspace}
+          onAddLatexDocToWorkspace={handleAddLatexDoc}
           onDeleteWorkspace={requestDeleteWorkspace}
           onDeleteDoc={handleDeleteDoc2}
           onRenameDoc={handleRenameDoc}

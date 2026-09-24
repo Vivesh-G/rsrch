@@ -8,6 +8,7 @@ export interface DocumentItem {
   added_at: number;
   has_file: boolean;
   page_count: number;
+  doc_type?: 'pdf' | 'latex';
   file?: File;
 }
 

@@ -59,6 +59,47 @@ const MemoizedMessageList = React.memo(({ messages, isWaiting }: { messages: Cha
             <ReactMarkdown 
               remarkPlugins={[remarkGfm, remarkMath]}
               rehypePlugins={[rehypeKatex]}
+              components={{
+                code({ node, className, children, ...props }: any) {
+                  const match = /language-(\w+)/.exec(className || '');
+                  const lang = match?.[1]?.toLowerCase();
+                  const isLatex = lang === 'latex' || lang === 'tex';
+                  // react-markdown v10 no longer passes `inline`: a fenced
+                  // block arrives as pre > code with a language- class, while
+                  // inline `code` has no language. Language check alone is
+                  // sufficient and version-proof.
+                  if (isLatex) {
+                    const flatten = (n: React.ReactNode): string =>
+                      Array.isArray(n)
+                        ? n.map(flatten).join('')
+                        : typeof n === 'string' || typeof n === 'number'
+                          ? String(n)
+                          : '';
+                    const code = flatten(children).replace(/\n$/, '');
+                    return (
+                      <div className="ai-code-block" style={{ position: 'relative', marginTop: 8, marginBottom: 8 }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: 'var(--surface-subtle)', padding: '4px 8px', borderTopLeftRadius: 4, borderTopRightRadius: 4, fontSize: 12 }}>
+                          <span style={{ color: 'var(--text-tertiary)' }}>LaTeX</span>
+                          <button 
+                            className="pdf-popup-btn primary" 
+                            style={{ height: 22, padding: '0 8px', fontSize: 11 }}
+                            onClick={() => window.dispatchEvent(new CustomEvent('rsrch:latex-apply', { detail: { code } }))}
+                            type="button"
+                          >
+                            ✨ Replace Selection
+                          </button>
+                        </div>
+                        <pre style={{ margin: 0, borderTopLeftRadius: 0, borderTopRightRadius: 0, padding: '12px' }}>
+                          <code className={className} {...props}>
+                            {children}
+                          </code>
+                        </pre>
+                      </div>
+                    );
+                  }
+                  return <code className={className} {...props}>{children}</code>;
+                }
+              }}
             >
               {msg.content}
             </ReactMarkdown>
@@ -102,6 +143,17 @@ const ChatPanelInner = ({ activeDocId, activeDocTitle, resolveDocTitle, style, d
     return () => {
       if (scrollTimerRef.current) clearTimeout(scrollTimerRef.current);
     };
+  }, []);
+
+  useEffect(() => {
+    const handleAppend = (e: Event) => {
+      const detail = (e as CustomEvent).detail;
+      if (detail && detail.text) {
+        setInput((prev) => prev ? prev + '\n\n' + detail.text : detail.text);
+      }
+    };
+    window.addEventListener('rsrch:chat-append', handleAppend);
+    return () => window.removeEventListener('rsrch:chat-append', handleAppend);
   }, []);
 
   const refreshChats = useCallback(async (): Promise<ChatSession[]> => {

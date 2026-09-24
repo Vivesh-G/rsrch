@@ -17,12 +17,14 @@ class DocumentBase(BaseModel):
     note_title: Optional[str] = Field(default=None, max_length=120)
     tag: str = Field(default="General", min_length=1, max_length=30)
     bookmarked: bool = False
+    doc_type: str = Field(default="pdf", max_length=10)
 
 
 class DocumentUpdate(BaseModel):
     note_title: Optional[str] = Field(default=None, max_length=120)
     tag: Optional[str] = Field(default=None, min_length=1, max_length=30)
     bookmarked: Optional[bool] = None
+    doc_type: Optional[str] = Field(default=None, max_length=10)
 
 
 class DocumentResponse(DocumentBase):

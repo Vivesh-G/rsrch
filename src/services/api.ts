@@ -104,6 +104,24 @@ export const api = {
     return doc;
   },
 
+  async createLatexDocument(
+    workspaceId: string,
+    name: string = "document.tex"
+  ): Promise<DocumentItem> {
+    const formData = new FormData();
+    formData.append('name', name);
+
+    return req<DocumentItem>(
+      `/workspaces/${enc(workspaceId)}/documents/latex`,
+      { method: 'POST', body: formData },
+      LONG_TIMEOUT_MS,
+    );
+  },
+
+  async compileDocument(docId: string): Promise<any> {
+    return req<any>(`/documents/${enc(docId)}/compile`, { method: 'POST' }, LONG_TIMEOUT_MS);
+  },
+
   async updateDocument(
     id: string,
     updates: { note_title?: string; tag?: string; bookmarked?: boolean }

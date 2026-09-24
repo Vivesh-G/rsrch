@@ -2226,6 +2226,12 @@ body.dark .pdf-highlight-mark {
   background: transparent;
 }
 
+.save-badge.error {
+  color: var(--danger);
+  border-color: var(--danger);
+  background: transparent;
+}
+
 .save-btn.is-saved {
   color: var(--success);
   border-color: var(--success);

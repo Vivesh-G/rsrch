@@ -1,6 +1,7 @@
 import React, { useState, useRef, useEffect } from 'react';
 import type { DocumentItem } from '../types';
 import { LiveMarkdownEditor } from './LiveMarkdownEditor';
+import { CodeMirrorLatexEditor } from './CodeMirrorLatexEditor';
 import {
   IconSave,
   IconCheck,
@@ -15,7 +16,7 @@ interface NotesPanelProps {
   doc: DocumentItem | null;
   noteContent: string;
   style?: React.CSSProperties;
-  saveStatus?: 'saved' | 'saving' | 'idle';
+  saveStatus?: 'saved' | 'saving' | 'idle' | 'error';
   lastSavedTime?: string | null;
   onNoteChange: (content: string) => void;
   onManualSave?: (content?: string) => void;
@@ -116,13 +117,16 @@ const NotesPanelInner: React.FC<NotesPanelProps> = ({
 
   const handleDownloadNote = () => {
     if (!doc) return;
-    const safeName =
-      (currentTitle.trim() || 'note').replace(/[\\/:*?"<>|]/g, '').slice(0, 100) || 'note';
-    const blob = new Blob([noteContent], { type: 'text/markdown;charset=utf-8' });
+    const isLatex = doc.doc_type === 'latex';
+    const ext = isLatex ? '.tex' : '.md';
+    const mime = isLatex ? 'text/x-tex;charset=utf-8' : 'text/markdown;charset=utf-8';
+    const base = currentTitle.trim().replace(/\.tex$/i, '').replace(/\.md$/i, '') || 'document';
+    const safeName = base.replace(/[\\/:*?"<>|]/g, '').slice(0, 100) || 'document';
+    const blob = new Blob([noteContent], { type: mime });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `${safeName}.md`;
+    a.download = `${safeName}${ext}`;
     // Appended (not detached) so Firefox/Safari honor the click.
     document.body.appendChild(a);
     a.click();
@@ -272,6 +276,8 @@ const NotesPanelInner: React.FC<NotesPanelProps> = ({
             <span className={`save-badge ${saveStatus}`} id="saveBadge">
               {saveStatus === 'saving' ? (
                 <span>Saving…</span>
+              ) : saveStatus === 'error' ? (
+                <span>Build failed</span>
               ) : (
                 <>
                   <IconCheck size={11} />
@@ -286,14 +292,22 @@ const NotesPanelInner: React.FC<NotesPanelProps> = ({
           </span>
         </div>
 
-        {doc && (
+        {doc && doc.doc_type === 'latex' ? (
+          <CodeMirrorLatexEditor
+            docId={doc.id}
+            content={noteContent}
+            onChange={onNoteChange}
+            onManualSave={onManualSave}
+            onWordCountChange={setWordCount}
+          />
+        ) : doc ? (
           <LiveMarkdownEditor
             content={noteContent}
             onChange={onNoteChange}
             onManualSave={onManualSave}
             onWordCountChange={setWordCount}
           />
-        )}
+        ) : null}
       </div>
     </aside>
   );

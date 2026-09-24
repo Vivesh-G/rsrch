@@ -61,6 +61,7 @@ async def init_db():
                 added_at REAL NOT NULL,
                 file_path TEXT,
                 page_count INTEGER DEFAULT 1,
+                doc_type TEXT DEFAULT 'pdf',
                 FOREIGN KEY(workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE
             );
         """)
@@ -74,6 +75,11 @@ async def init_db():
         """)
         try:
             await db.execute("ALTER TABLE documents ADD COLUMN extracted_text TEXT DEFAULT ''")
+        except Exception:
+            pass
+
+        try:
+            await db.execute("ALTER TABLE documents ADD COLUMN doc_type TEXT DEFAULT 'pdf'")
         except Exception:
             pass
 
@@ -206,18 +212,23 @@ async def create_document(
     file_path: Optional[str] = None,
     page_count: int = 1,
     extracted_text: str = "",
+    doc_type: str = "pdf",
 ) -> Dict[str, Any]:
     now = time.time()
     title = note_title or os.path.splitext(name)[0]
-    starter_note = STARTER_NOTE_TEMPLATE.replace("this document", title)
+    
+    if doc_type == "latex":
+        starter_note = "\\documentclass{article}\n\\begin{document}\n\n\\title{" + title + "}\n\\maketitle\n\nWelcome to your new LaTeX document!\n\n\\end{document}"
+    else:
+        starter_note = STARTER_NOTE_TEMPLATE.replace("this document", title)
 
     async with get_db() as db:
         await db.execute(
             """
-            INSERT INTO documents (id, workspace_id, name, note_title, tag, bookmarked, added_at, file_path, page_count, extracted_text)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO documents (id, workspace_id, name, note_title, tag, bookmarked, added_at, file_path, page_count, extracted_text, doc_type)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (doc_id, workspace_id, name, title, tag, 0, now, file_path, page_count, extracted_text),
+            (doc_id, workspace_id, name, title, tag, 0, now, file_path, page_count, extracted_text, doc_type),
         )
         await db.execute(
             """
@@ -238,6 +249,7 @@ async def create_document(
         "added_at": now,
         "has_file": bool(file_path),
         "page_count": page_count,
+        "doc_type": doc_type,
     }
 
 

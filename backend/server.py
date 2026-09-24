@@ -1,4 +1,5 @@
 import os
+import glob
 import uuid
 import asyncio
 import time
@@ -51,6 +52,7 @@ from models import (
     ChatSendResponse,
 )
 
+from compiler import run_compile, get_build_key
 import pymupdf
 from dotenv import load_dotenv
 from google import genai
@@ -115,6 +117,16 @@ load_dotenv() # also load from current dir if exists
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_db()
+    # Reclaim disk from the pre-cap era: enforce per-doc/global bounds once
+    # at startup, off the event loop so boot isn't blocked by huge folders.
+    try:
+        from compiler import prune_all_builds
+        stats = await asyncio.to_thread(prune_all_builds)
+        if stats.get("deleted_dirs"):
+            print(f"Pruned {stats['deleted_dirs']} stale LaTeX builds "
+                  f"({stats['freed_bytes'] / 1048576:.1f} MB freed)")
+    except Exception as e:
+        print(f"Build prune skipped: {e}")
     yield
 
 
@@ -217,7 +229,40 @@ async def upload_document(
         file_path=saved_path,
         page_count=page_count,
         extracted_text=extracted_text,
+        doc_type="pdf",
     )
+    return doc
+
+
+@app.post("/api/workspaces/{ws_id}/documents/latex", response_model=DocumentResponse)
+async def create_latex_document(
+    ws_id: str,
+    name: str = Form(..., min_length=1),
+):
+    ws = await get_workspace(ws_id)
+    if not ws:
+        raise HTTPException(status_code=404, detail="Workspace not found")
+
+    doc_id = f"doc_{uuid.uuid4().hex[:10]}"
+    clean_name = name.strip()
+    if not clean_name.lower().endswith(".tex"):
+        clean_name += ".tex"
+
+    doc = await create_document(
+        doc_id=doc_id,
+        workspace_id=ws_id,
+        name=clean_name,
+        note_title=clean_name,
+        tag="General",
+        file_path=None,
+        page_count=1,
+        extracted_text="",
+        doc_type="latex",
+    )
+    
+    note = await get_note(doc_id)
+    await run_compile(doc_id, note.get("content", ""))
+    
     return doc
 
 
@@ -232,7 +277,40 @@ async def get_doc(doc_id: str):
 @app.get("/api/documents/{doc_id}/file")
 async def get_doc_file(doc_id: str):
     doc = await get_document(doc_id)
-    if not doc or not doc.get("file_path") or not os.path.exists(doc["file_path"]):
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    if doc.get("doc_type") == "latex":
+        note = await get_note(doc_id)
+        source_content = note.get("content", "")
+        build_key = get_build_key(source_content, f"{doc_id}.tex")
+        pdf_path = os.path.join(os.path.dirname(__file__), "data", "latex_builds", build_key, f"{doc_id}.pdf")
+        if not os.path.exists(pdf_path):
+            result = await run_compile(doc_id, source_content)
+            if result.status != "success":
+                # Fallback to the latest successful build
+                base_dir = os.path.join(os.path.dirname(__file__), "data", "latex_builds")
+                pattern = os.path.join(base_dir, "*", f"{doc_id}.pdf")
+                pdfs = glob.glob(pattern)
+                if pdfs:
+                    pdf_path = max(pdfs, key=os.path.getmtime)
+                else:
+                    # No successful build exists yet (e.g. brand-new doc with
+                    # invalid default content). 404 keeps the viewer in its
+                    # loading/empty state instead of a 500 crash loop; the
+                    # real diagnostics come via POST /compile.
+                    raise HTTPException(status_code=404, detail="PDF not compiled yet")
+            else:
+                if not os.path.exists(pdf_path):
+                    raise HTTPException(status_code=404, detail="PDF not compiled yet")
+        return FileResponse(
+            path=pdf_path,
+            media_type="application/pdf",
+            filename=doc["name"].replace(".tex", ".pdf"),
+            headers={"Accept-Ranges": "bytes", "Cache-Control": "no-store"},
+        )
+
+    if not doc.get("file_path") or not os.path.exists(doc["file_path"]):
         raise HTTPException(status_code=404, detail="PDF file not found")
     
     return FileResponse(
@@ -241,6 +319,18 @@ async def get_doc_file(doc_id: str):
         filename=doc["name"],
         headers={"Accept-Ranges": "bytes"},
     )
+
+@app.post("/api/documents/{doc_id}/compile")
+async def compile_document(doc_id: str):
+    doc = await get_document(doc_id)
+    if not doc or doc.get("doc_type") != "latex":
+        raise HTTPException(status_code=404, detail="LaTeX Document not found")
+        
+    note = await get_note(doc_id)
+    source_content = note.get("content", "")
+    
+    result = await run_compile(doc_id, source_content)
+    return result.model_dump()
 
 
 @app.put("/api/documents/{doc_id}", response_model=DocumentResponse)
@@ -325,7 +415,11 @@ async def send_chat_message(chat_id: str, request: ChatSendRequest):
         per_doc = CHAT_CONTEXT_CHARS // len(context_docs)
         parts = []
         for doc in context_docs:
-            text = (doc.get("extracted_text", "") or "")[:per_doc]
+            if doc.get("doc_type") == "latex":
+                note = await get_note(doc["id"])
+                text = (note.get("content", "") or "")[:per_doc]
+            else:
+                text = (doc.get("extracted_text", "") or "")[:per_doc]
             label = doc.get("note_title") or doc.get("name") or "Document"
             parts.append(f"[{label}]\n{text}")
         context_block = "\n\n---\n\n".join(parts)

@@ -46,6 +46,27 @@ export const IconDragHandle: React.FC<IconProps> = ({ size = 16, className = '',
 
 
 
+export const IconLatex: React.FC<IconProps> = ({ size = 16, className = '', style, ...rest }) => (
+  <svg
+    width={size}
+    height={size}
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth="2"
+    strokeLinecap="round"
+    strokeLinejoin="round"
+    className={`icon-svg ${className}`}
+    style={style}
+    {...rest}
+  >
+    <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+    <polyline points="14 2 14 8 20 8"></polyline>
+    <path d="M10 13l-2 2 2 2"></path>
+    <path d="M14 17l2-2-2-2"></path>
+  </svg>
+);
+
 export const IconDoc: React.FC<IconProps> = ({ size = 16, className = '', style, ...rest }) => (
   <svg
     width={size}

@@ -54,6 +54,17 @@ interface DocViewerProps {
 
 const baseName = (n?: string) => (n || '').replace(/\.pdf$/i, '');
 const HL_KEY = (docId: string) => `rsrch-pdf-highlights-${docId}`;
+const PAGE_KEY = (docId: string) => `rshr-page-${docId}`;
+
+// Cross-remount handoff for LaTeX auto-renders. Closing + reopening the
+// document resets scroll state to page 1, and the page-save effect would
+// persist that transient "1" over the user's real position before the
+// restore pass runs — every render lands back on page 1. So the compile
+// handler captures the true page BEFORE close (map survives the
+// LoadedViewer unmount/remount), the save effect pauses while a reload is
+// in flight, and the restore pass prefers the captured value.
+const latexPageRestore = new Map<string, number>();
+const latexReloading = new Set<string>();
 
 const plugins = [
   createPluginRegistration(DocumentManagerPluginPackage),
@@ -120,7 +131,7 @@ const DocumentKeeper: React.FC<{ doc: DocumentItem }> = ({ doc }) => {
                 done(false);
               },
             );
-        } else if (doc.has_file) {
+        } else if (doc.has_file || doc.doc_type === 'latex') {
           if (cancelled) {
             done(false);
             return;
@@ -157,6 +168,107 @@ const DocumentKeeper: React.FC<{ doc: DocumentItem }> = ({ doc }) => {
     // registry updates and would re-trigger open in a loop.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ready, doc.id, doc.file, doc.has_file, doc.name]);
+
+  useEffect(() => {
+    let reloadSeq = 0;
+    const handleCompile = (e: Event) => {
+      const detail = (e as CustomEvent).detail;
+      if (detail?.docId === doc.id && (doc.has_file || doc.doc_type === 'latex') && mgrRef.current) {
+         try {
+            const mgr: any = mgrRef.current;
+            const timestamp = Date.now();
+            const mySeq = ++reloadSeq;
+            // Capture the open page BEFORE close: after close the scroll
+            // state resets to 1 and would clobber the saved position.
+            let wantPage: number | null = null;
+            try {
+              const raw = localStorage.getItem(PAGE_KEY(doc.id));
+              const n = raw ? parseInt(raw, 10) : NaN;
+              if (Number.isFinite(n) && (n as number) >= 1) wantPage = n as number;
+            } catch {}
+            if (wantPage == null) {
+              const fallback = latexPageRestore.get(doc.id);
+              if (fallback != null && fallback >= 1) wantPage = fallback;
+            }
+            if (wantPage != null) latexPageRestore.set(doc.id, wantPage);
+            latexReloading.add(doc.id);
+            // closeDocument is ASYNC (returns a Task). The previous code
+            // fired open immediately after close, so open raced close on
+            // the same documentId: the engine could reject with duplicate
+            // id or leave the store closed. Network headers still resolve
+            // (HTTP 200) while the viewer stays blank — exactly the
+            // reported symptom. Chain open after close settles, and drop
+            // stale reloads from rapid successive compiles.
+            const doOpen = () => {
+              if (mySeq !== reloadSeq) return; // superseded by newer compile
+              openedRef.current.delete(doc.id);
+              openingRef.current.add(doc.id);
+              try {
+                mgr
+                  .openDocumentUrl({
+                    url: api.getDocumentFileUrl(doc.id) + "?t=" + timestamp,
+                    name: doc.name,
+                    documentId: doc.id,
+                  })
+                  .wait(
+                    () => {
+                      if (mySeq !== reloadSeq) return;
+                      openingRef.current.delete(doc.id);
+                      openedRef.current.add(doc.id);
+                      // Notify the viewer (covers the path where LoadedViewer
+                      // never unmounted so its mount-restore doesn't rerun).
+                      // The remount path consumes latexPageRestore instead;
+                      // both target the same page so a double-fire is harmless.
+                      const target = latexPageRestore.get(doc.id);
+                      if (target != null) {
+                        window.dispatchEvent(
+                          new CustomEvent('rsrch:latex-restored', {
+                            detail: { docId: doc.id, page: target },
+                          })
+                        );
+                      }
+                      // Grace period: post-open scroll state briefly reports
+                      // page 1 before the restore lands — keep the save
+                      // effect paused until then so "1" isn't persisted.
+                      setTimeout(() => latexReloading.delete(doc.id), 3000);
+                    },
+                    (reason: unknown) => {
+                      console.error('Failed to reload PDF after compile:', reason);
+                      openingRef.current.delete(doc.id);
+                      latexReloading.delete(doc.id);
+                    },
+                  );
+              } catch (err) {
+                console.error('Failed to reload PDF after compile:', err);
+                openingRef.current.delete(doc.id);
+                latexReloading.delete(doc.id);
+              }
+            };
+            // Reload under the SAME documentId: Viewport/Scroller/RenderLayer
+            // and DocumentContent are all bound to doc.id. Opening a new
+            // "_latex_<ts>" id orphans the UI (it keeps watching the closed
+            // id → blank viewer). Cache-bust via URL query instead.
+            try {
+              const closeTask = mgr.closeDocument(doc.id);
+              if (closeTask && typeof closeTask.wait === 'function') {
+                closeTask.wait(() => doOpen(), () => doOpen());
+              } else if (closeTask && typeof closeTask.toPromise === 'function') {
+                closeTask.toPromise().then(() => doOpen(), () => doOpen());
+              } else {
+                doOpen();
+              }
+            } catch {
+              doOpen();
+            }
+         } catch (err) { console.error(err); }
+      }
+    };
+    window.addEventListener('rsrch:latex-compiled', handleCompile);
+    return () => {
+      reloadSeq++;
+      window.removeEventListener('rsrch:latex-compiled', handleCompile);
+    };
+  }, [doc.id, doc.has_file, doc.doc_type, doc.name]);
 
   // Full unmount only (leaving the viewer): release all engine documents.
   useEffect(() => {
@@ -593,7 +705,11 @@ const LoadedViewer: React.FC<DocViewerProps> = ({
   // extra triggers (onLayoutChange replays the last layout to subscribers).
   useEffect(() => {
     if (!scrollApi || !docId || scrollRestoredRef.current.has(docId)) return;
-    const saved = localStorage.getItem(`rshr-page-${docId}`);
+    // Prefer the pre-reload capture (immune to the page-1 clobber); consume
+    // it so a later remount falls back to the persisted value.
+    const pending = latexPageRestore.get(docId);
+    if (pending != null) latexPageRestore.delete(docId);
+    const saved = pending != null ? String(pending) : localStorage.getItem(PAGE_KEY(docId));
     if (!saved) { scrollRestoredRef.current.add(docId); return; }
     const pageNum = parseInt(saved, 10);
     if (isNaN(pageNum) || pageNum < 1) { scrollRestoredRef.current.add(docId); return; }
@@ -648,12 +764,49 @@ const LoadedViewer: React.FC<DocViewerProps> = ({
     };
   }, [scrollApi, scrollCapability, docId]);
 
-  // Save scroll
+  // Save scroll (paused while a LaTeX reload is in flight — the torn-down
+  // document briefly reports page 1, which must not overwrite the real
+  // position being restored).
   useEffect(() => {
-    if (scrollState?.currentPage && docId) {
-      localStorage.setItem(`rshr-page-${docId}`, String(scrollState.currentPage));
+    if (scrollState?.currentPage && docId && !latexReloading.has(docId)) {
+      try {
+        localStorage.setItem(PAGE_KEY(docId), String(scrollState.currentPage));
+      } catch {}
     }
   }, [scrollState?.currentPage, docId]);
+
+  // Latex-reload restore for the no-unmount path: if LoadedViewer survived
+  // the close/open (mount-restore didn't rerun), scroll once layout is
+  // measurable. Retries mirror the mount-restore polling.
+  useEffect(() => {
+    if (!scrollApi || !docId) return;
+    const handler = (e: Event) => {
+      const d = (e as CustomEvent<{ docId: string; page: number }>).detail;
+      if (!d || d.docId !== docId || !d.page || d.page < 1) return;
+      let attempts = 0;
+      const t = setInterval(() => {
+        attempts += 1;
+        let ready = false;
+        try {
+          const layout = (scrollApi as any).getLayout?.();
+          ready = Array.isArray(layout?.virtualItems) && layout.virtualItems.length > 0;
+        } catch {
+          ready = false;
+        }
+        if (ready) {
+          try {
+            scrollApi.scrollToPage({ pageNumber: d.page, behavior: 'instant' });
+          } catch {}
+          latexPageRestore.delete(docId);
+          clearInterval(t);
+        } else if (attempts >= 16) {
+          clearInterval(t);
+        }
+      }, 250);
+    };
+    window.addEventListener('rsrch:latex-restored', handler);
+    return () => window.removeEventListener('rsrch:latex-restored', handler);
+  }, [scrollApi, docId]);
 
   const showToast = useCallback((msg: string) => {
     if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
@@ -724,26 +877,52 @@ const LoadedViewer: React.FC<DocViewerProps> = ({
   const prevPage = () => scrollApi?.scrollToPreviousPage('smooth');
   const nextPage = () => scrollApi?.scrollToNextPage('smooth');
 
-  const handleDownload = () => {
-    const a = document.createElement('a');
-    // Detached-anchor click() is ignored by Firefox/Safari — append first.
-    document.body.appendChild(a);
+  const handleDownload = async () => {
+    if (!doc) return;
+    const downloadName = doc.name.replace(/\.tex$/i, '.pdf');
     if (doc.file) {
+      const a = document.createElement('a');
+      document.body.appendChild(a);
       const url = URL.createObjectURL(doc.file);
       a.href = url;
-      a.download = doc.name;
+      a.download = downloadName;
       a.click();
       setTimeout(() => URL.revokeObjectURL(url), 10_000);
-    } else if (doc.has_file) {
-      a.href = api.getDocumentFileUrl(doc.id);
-      a.download = doc.name;
-      a.click();
-    } else if (onDownloadNotes) {
       a.remove();
+      showToast('Downloaded PDF');
+    } else if (doc.has_file || doc.doc_type === 'latex') {
+      try {
+        const fileUrl = api.getDocumentFileUrl(doc.id);
+        const res = await fetch(fileUrl);
+        if (!res.ok) {
+          if (res.status === 404) {
+            showToast('PDF not ready — please check compile errors first');
+            return;
+          }
+          throw new Error(`Download failed with status ${res.status}`);
+        }
+        const blob = await res.blob();
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        document.body.appendChild(a);
+        a.href = url;
+        a.download = downloadName;
+        a.click();
+        setTimeout(() => URL.revokeObjectURL(url), 10_000);
+        a.remove();
+        showToast('Downloaded PDF');
+      } catch (err) {
+        console.warn('Blob download failed, falling back to direct anchor:', err);
+        const a = document.createElement('a');
+        document.body.appendChild(a);
+        a.href = api.getDocumentFileUrl(doc.id);
+        a.download = downloadName;
+        a.click();
+        a.remove();
+      }
+    } else if (onDownloadNotes) {
       onDownloadNotes();
-      return;
     }
-    a.remove();
   };
 
   const togglePresent = () => {
