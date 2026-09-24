@@ -39,6 +39,7 @@ export const RightSidebar: React.FC<RightSidebarProps> = React.memo(({
           onClick={onToggleCollapse}
           type="button"
           aria-label={collapsed ? 'Expand right sidebar' : 'Collapse right sidebar'}
+          aria-expanded={!collapsed}
         >
           {collapsed ? <IconChevronLeft size={13} /> : <IconChevronRight size={13} />}
         </button>
@@ -56,7 +57,7 @@ export const RightSidebar: React.FC<RightSidebarProps> = React.memo(({
         >
           {isViewerOpen && <span className="right-sidebar-active-bar" />}
           <IconDoc size={17} />
-          <span className="right-sidebar-tooltip">
+          <span className="right-sidebar-tooltip" aria-hidden="true">
             PDF Viewer
             <small>{isViewerOpen ? 'Open' : 'Collapsed'}</small>
           </span>
@@ -73,7 +74,7 @@ export const RightSidebar: React.FC<RightSidebarProps> = React.memo(({
         >
           {isChatOpen && <span className="right-sidebar-active-bar" />}
           <IconChat size={17} />
-          <span className="right-sidebar-tooltip">
+          <span className="right-sidebar-tooltip" aria-hidden="true">
             AI Chat
             <small>{isChatOpen ? 'Open' : 'Collapsed'}</small>
           </span>
@@ -90,7 +91,7 @@ export const RightSidebar: React.FC<RightSidebarProps> = React.memo(({
         >
           {isNotesOpen && <span className="right-sidebar-active-bar" />}
           <IconPencil size={17} />
-          <span className="right-sidebar-tooltip">
+          <span className="right-sidebar-tooltip" aria-hidden="true">
             Notes
             <small>{isNotesOpen ? 'Open' : 'Collapsed'}</small>
           </span>

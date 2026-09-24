@@ -512,11 +512,26 @@ body {
   box-shadow: var(--shadow-lg);
 }
 
+/* Keyboard/touch users get no hover: reveal the drawer when focus moves
+   inside it, otherwise focused off-canvas controls are invisible. */
+.sidebar.collapsed:focus-within {
+  transform: translateX(0);
+  box-shadow: var(--shadow-lg);
+}
+
 .sidebar.collapsed:hover::before {
   display: none;
 }
 
+.sidebar.collapsed:focus-within::before {
+  display: none;
+}
+
 .sidebar.collapsed:hover::after {
+  opacity: 0;
+}
+
+.sidebar.collapsed:focus-within::after {
   opacity: 0;
 }
 
@@ -598,11 +613,25 @@ body {
   box-shadow: var(--shadow-lg);
 }
 
+/* Keyboard users get no hover: reveal the drawer when focus moves inside. */
+.right-sidebar.collapsed:focus-within {
+  transform: translateX(0);
+  box-shadow: var(--shadow-lg);
+}
+
 .right-sidebar.collapsed:hover::before {
   display: none;
 }
 
+.right-sidebar.collapsed:focus-within::before {
+  display: none;
+}
+
 .right-sidebar.collapsed:hover::after {
+  opacity: 0;
+}
+
+.right-sidebar.collapsed:focus-within::after {
   opacity: 0;
 }
 
@@ -841,6 +870,12 @@ body.dark .right-sidebar-active-bar {
 .resizer:hover,
 .resizer:active {
   background: transparent !important;
+}
+
+.resizer:focus-visible {
+  outline: 2px solid var(--border-strong);
+  outline-offset: -2px;
+  border-radius: 3px;
 }
 
 /* SIDEBAR TREE & ARCHITECTURE */

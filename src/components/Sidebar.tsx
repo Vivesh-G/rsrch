@@ -93,6 +93,7 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
       className={`sidebar ${collapsed ? 'collapsed' : ''}`}
       id="sidebar"
       style={style}
+      aria-label="Workspace sidebar"
     >
       <div className="ws-head">
         <div className="ws-head-left">
@@ -100,6 +101,9 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
             className="icon-btn small"
             id="sidebarToggle"
             title={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+            aria-label={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+            aria-expanded={!collapsed}
+            aria-controls="wsTree"
             onClick={onToggleSidebar}
             type="button"
           >
@@ -111,6 +115,7 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
           className="icon-btn small"
           id="addWsBtn"
           title="Add workspace"
+          aria-label="Add workspace"
           onClick={onCreateWorkspace}
           type="button"
         >
@@ -145,6 +150,7 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
                     <button
                       className="ws-action-btn"
                       title={`Add PDF to ${w.name}`}
+                      aria-label={`Add PDF to ${w.name}`}
                       onClick={() => onAddDocToWorkspace(w.id)}
                       type="button"
                     >
@@ -153,6 +159,7 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
                     <button
                       className="ws-action-btn ws-delete"
                       title={`Delete workspace "${w.name}"`}
+                      aria-label={`Delete workspace "${w.name}"`}
                       onClick={() => onDeleteWorkspace?.(w.id)}
                       type="button"
                     >
@@ -211,6 +218,7 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
                           <button
                             className="doc-delete-btn"
                             title={`Delete "${title}"`}
+                            aria-label={`Delete "${title}"`}
                             onClick={(e) => {
                               e.stopPropagation();
                               onDeleteDoc?.(w.id, d.id);

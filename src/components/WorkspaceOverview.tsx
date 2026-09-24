@@ -73,6 +73,7 @@ const WorkspaceOverviewInner: React.FC<WorkspaceOverviewProps> = ({
             <button
               className="icon-btn small ws-ov-delete"
               title={`Delete workspace "${workspace.name}"`}
+              aria-label={`Delete workspace "${workspace.name}"`}
               onClick={() => onDeleteWorkspace?.(workspace.id)}
               type="button"
             >
@@ -92,6 +93,7 @@ const WorkspaceOverviewInner: React.FC<WorkspaceOverviewProps> = ({
               className="icon-btn small panel-close-btn"
               id="closeOverviewBtn"
               title="Close PDF viewer (move to right sidebar)"
+              aria-label="Close PDF viewer panel"
               onClick={onClose}
               type="button"
             >
@@ -197,7 +199,13 @@ export const WorkspaceOverview = React.memo(
       prev.workspace === next.workspace &&
       prev.searchQuery === next.searchQuery &&
       prev.notesCache === next.notesCache &&
-      prev.onClose === next.onClose
+      prev.onClose === next.onClose &&
+      prev.onAddPdf === next.onAddPdf &&
+      prev.onSelectDoc === next.onSelectDoc &&
+      prev.onDeleteDoc === next.onDeleteDoc &&
+      prev.onDeleteWorkspace === next.onDeleteWorkspace &&
+      prev.onRenameDoc === next.onRenameDoc &&
+      prev.dragHandle === next.dragHandle
     );
   }
 );

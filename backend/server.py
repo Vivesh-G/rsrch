@@ -178,19 +178,27 @@ async def upload_document(
         raise HTTPException(status_code=404, detail="Workspace not found")
 
     doc_id = f"doc_{uuid.uuid4().hex[:10]}"
-    file_name = file.filename or "document.pdf"
-    file_ext = os.path.splitext(file_name)[1].lower()
-    if not file_ext:
-        file_ext = ".pdf"
+    raw_name = (file.filename or "document.pdf")[:255]
+    file_name = raw_name.strip() or "document.pdf"
 
     contents = await file.read()
+    if len(contents) == 0:
+        raise HTTPException(status_code=400, detail="Empty file")
     if len(contents) > MAX_UPLOAD_BYTES:
         raise HTTPException(status_code=413, detail="File too large")
-    # Magic-byte check: extension alone lets arbitrary files in as ".pdf".
-    if not file_name.lower().endswith(".pdf") and contents[:5] != b"%PDF-":
+    # Magic-byte check: either signal alone rejects. The previous
+    # `and` required BOTH a bad extension AND bad magic bytes, so a
+    # renamed executable (evil.pdf + non-PDF bytes) sailed through.
+    if not file_name.lower().endswith(".pdf") or contents[:5] != b"%PDF-":
         raise HTTPException(status_code=400, detail="Only PDF files are accepted")
 
-    saved_path = os.path.join(PDF_DIR, f"{doc_id}{file_ext}")
+    # Clamp unbounded form fields before they reach the DB.
+    clean_tag = (tag or "General").strip()[:30] or "General"
+    clean_title = note_title.strip()[:120] if note_title and note_title.strip() else None
+
+    # Never persist attacker-controlled extensions (.html/.svg/.exe);
+    # stored bytes are validated PDFs, always saved as .pdf.
+    saved_path = os.path.join(PDF_DIR, f"{doc_id}.pdf")
 
     with open(saved_path, "wb") as f:
         f.write(contents)
@@ -204,8 +212,8 @@ async def upload_document(
         doc_id=doc_id,
         workspace_id=ws_id,
         name=file_name,
-        note_title=note_title,
-        tag=tag or "General",
+        note_title=clean_title,
+        tag=clean_tag,
         file_path=saved_path,
         page_count=page_count,
         extracted_text=extracted_text,

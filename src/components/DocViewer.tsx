@@ -180,9 +180,32 @@ const DocumentKeeper: React.FC<{ doc: DocumentItem }> = ({ doc }) => {
 // when the document state isn't registered yet.
 type AnnotationTransfer = { annotation?: { id?: string; pageIndex?: number } };
 
+const MAX_SAVED_ANNOTATIONS = 500;
+const MAX_SAVED_ANNOTATIONS_BYTES = 1_000_000;
+
 const transferId = (item: unknown): string | null => {
   const id = (item as AnnotationTransfer)?.annotation?.id;
   return typeof id === 'string' && id ? id : null;
+};
+
+// M5: localStorage is same-origin attacker-controlled input. Validate shape
+// before handing objects to the WASM engine — id/pageIndex bounds, finite
+// numbers, bounded counts — so a poisoned cache can't inject arbitrary
+// payloads into importAnnotations.
+const isValidTransfer = (item: unknown): boolean => {
+  if (typeof item !== 'object' || item === null) return false;
+  const ann = (item as AnnotationTransfer)?.annotation;
+  if (typeof ann !== 'object' || ann === null) return false;
+  if (typeof ann.id !== 'string' || !ann.id || ann.id.length > 128) return false;
+  if (!/^[A-Za-z0-9_-]+$/.test(ann.id)) return false;
+  if (typeof ann.pageIndex !== 'number' || !Number.isInteger(ann.pageIndex)) return false;
+  if (ann.pageIndex < 0 || ann.pageIndex > 10000) return false;
+  return true;
+};
+
+const sanitizeTransfers = (items: unknown[]): unknown[] => {
+  if (!Array.isArray(items)) return [];
+  return items.filter(isValidTransfer).slice(0, MAX_SAVED_ANNOTATIONS);
 };
 
 // The store appends imported uids to the page array with no dedupe, so
@@ -243,10 +266,16 @@ const HighlightRestorer: React.FC<{ docId: string }> = ({ docId }) => {
     try {
       const raw = localStorage.getItem(HL_KEY(docId));
       if (raw) {
-        const parsed = JSON.parse(raw);
-        if (Array.isArray(parsed) && parsed.length > 0) {
-          // If the first item lacks an annotation field, it's the old layout format.
-          if (parsed[0]?.annotation) saved = dedupeTransfers(parsed);
+        if (raw.length > MAX_SAVED_ANNOTATIONS_BYTES) {
+          try {
+            localStorage.removeItem(HL_KEY(docId));
+          } catch {}
+        } else {
+          const parsed = JSON.parse(raw);
+          if (Array.isArray(parsed) && parsed.length > 0) {
+            // If the first item lacks an annotation field, it's the old layout format.
+            if (parsed[0]?.annotation) saved = dedupeTransfers(sanitizeTransfers(parsed));
+          }
         }
       }
     } catch {
@@ -284,16 +313,18 @@ const HighlightRestorer: React.FC<{ docId: string }> = ({ docId }) => {
         }
         // Import only what's missing; re-add one survivor per repaired id.
         const wanted = saved ?? [];
-        const fresh = wanted.filter((it) => {
-          const id = transferId(it);
-          return !id || !existing.has(id);
-        });
+        const fresh = sanitizeTransfers(
+          wanted.filter((it) => {
+            const id = transferId(it);
+            return !id || !existing.has(id);
+          })
+        );
         for (const [id, n] of counts) {
           if (n <= 1) continue;
           const survivor =
             wanted.find((it) => transferId(it) === id) ??
             current.find((it) => transferId(it) === id);
-          if (survivor && !fresh.includes(survivor)) fresh.push(survivor);
+          if (survivor && isValidTransfer(survivor) && !fresh.includes(survivor)) fresh.push(survivor);
         }
         if (fresh.length > 0) {
           try {
@@ -337,8 +368,10 @@ const HighlightRestorer: React.FC<{ docId: string }> = ({ docId }) => {
         // throw out of these async callbacks.
         const save = (exported: unknown) => {
           try {
-            const clean = dedupeTransfers(Array.isArray(exported) ? exported : []);
-            localStorage.setItem(HL_KEY(docId), JSON.stringify(clean));
+            const clean = dedupeTransfers(sanitizeTransfers(Array.isArray(exported) ? exported : []));
+            const json = JSON.stringify(clean);
+            if (json.length > MAX_SAVED_ANNOTATIONS_BYTES) return;
+            localStorage.setItem(HL_KEY(docId), json);
           } catch (err) {
             console.warn('Failed to persist annotations:', err);
           }
@@ -803,38 +836,38 @@ const LoadedViewer: React.FC<DocViewerProps> = ({
 
         <div className="viewer-toolbar-center" style={{ display: 'flex', alignItems: 'center', gap: '4px', flexShrink: 0 }}>
           <div className="page-ctrl">
-            <button className="icon-btn small" id="prevPage" onClick={prevPage} disabled={currentPage <= 1} title="Previous page" type="button">‹</button>
+            <button className="icon-btn small" id="prevPage" onClick={prevPage} disabled={currentPage <= 1} title="Previous page" aria-label="Previous page" type="button">‹</button>
             <span className="page-ind">
               <b id="pageNum">{currentPage}</b>
               <span className="page-sep">/</span>
               <span id="pageTotal" className="muted">{totalPages}</span>
             </span>
-            <button className="icon-btn small" id="nextPage" onClick={nextPage} disabled={currentPage >= totalPages} title="Next page" type="button">›</button>
+            <button className="icon-btn small" id="nextPage" onClick={nextPage} disabled={currentPage >= totalPages} title="Next page" aria-label="Next page" type="button">›</button>
           </div>
 
           <div className="zoom-ctrl">
-            <button className="icon-btn small" id="zoomOut" onClick={() => zoomApi?.zoomOut()} title="Zoom out" type="button">−</button>
+            <button className="icon-btn small" id="zoomOut" onClick={() => zoomApi?.zoomOut()} title="Zoom out" aria-label="Zoom out" type="button">−</button>
             <span id="zoomLabel" onClick={() => zoomApi?.requestZoom(1 as any)} title="Click to reset zoom (100%)" style={{ cursor: 'pointer' }}>
               {Math.round(zoom * 100)}%
             </span>
-            <button className="icon-btn small" id="zoomIn" onClick={() => zoomApi?.zoomIn()} title="Zoom in" type="button">+</button>
+            <button className="icon-btn small" id="zoomIn" onClick={() => zoomApi?.zoomIn()} title="Zoom in" aria-label="Zoom in" type="button">+</button>
           </div>
         </div>
 
         <div className="tool-ctrl" style={{ display: 'inline-flex', alignItems: 'center', gap: '2px', flexShrink: 0, marginLeft: 'auto' }}>
-          <button className={`icon-btn small ${tintMode !== 'normal' ? 'tint-active' : ''}`} id="tintBtn" title={`Reading tint: ${tintMode} (click to cycle)`} onClick={cycleTintMode} type="button">
+          <button className={`icon-btn small ${tintMode !== 'normal' ? 'tint-active' : ''}`} id="tintBtn" title={`Reading tint: ${tintMode} (click to cycle)`} aria-label={`Reading tint: ${tintMode}`} onClick={cycleTintMode} type="button">
             <IconEye size={14} />
           </button>
-          <button className="icon-btn small" id="bookmarkBtn" title="Bookmark document" onClick={() => onToggleBookmark(doc.id)} type="button">
+          <button className="icon-btn small" id="bookmarkBtn" title="Bookmark document" aria-label={doc.bookmarked ? 'Remove bookmark' : 'Bookmark document'} aria-pressed={doc.bookmarked} onClick={() => onToggleBookmark(doc.id)} type="button">
             {doc.bookmarked ? <IconBookmarkFilled size={14} /> : <IconBookmark size={14} />}
           </button>
-          <button className="icon-btn small" id="downloadBtn" title="Download PDF" onClick={handleDownload} type="button">
+          <button className="icon-btn small" id="downloadBtn" title="Download PDF" aria-label="Download PDF" onClick={handleDownload} type="button">
             <IconDownload size={14} />
           </button>
-          <button className="icon-btn small" id="presentBtn" title={isFullscreen ? 'Exit fullscreen' : 'Fullscreen presentation'} onClick={togglePresent} type="button">
+          <button className="icon-btn small" id="presentBtn" title={isFullscreen ? 'Exit fullscreen' : 'Fullscreen presentation'} aria-label={isFullscreen ? 'Exit fullscreen' : 'Enter fullscreen'} onClick={togglePresent} type="button">
             {isFullscreen ? <IconMinimize size={14} /> : <IconMaximize size={14} />}
           </button>
-          <button className="icon-btn small tool-delete" id="deleteDocBtn" title={`Delete "${displayTitle}"`} onClick={() => onDeleteDoc?.(doc.id)} type="button">
+          <button className="icon-btn small tool-delete" id="deleteDocBtn" title={`Delete "${displayTitle}"`} aria-label={`Delete "${displayTitle}"`} onClick={() => onDeleteDoc?.(doc.id)} type="button">
             <IconTrash size={13} />
           </button>
           {onClose && (
@@ -842,6 +875,7 @@ const LoadedViewer: React.FC<DocViewerProps> = ({
               className="icon-btn small panel-close-btn"
               id="closeViewerBtn"
               title="Close PDF viewer (move to right sidebar)"
+              aria-label="Close PDF viewer panel"
               onClick={onClose}
               type="button"
             >
@@ -909,6 +943,7 @@ const InnerViewer: React.FC<DocViewerProps> = (props) => {
                         className="icon-btn small panel-close-btn"
                         id="closeViewerLoadingBtn"
                         title="Close PDF viewer (move to right sidebar)"
+                        aria-label="Close PDF viewer panel"
                         onClick={props.onClose}
                         type="button"
                       >

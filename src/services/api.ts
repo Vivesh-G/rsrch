@@ -53,6 +53,10 @@ const json = (body: unknown): RequestInit => ({
   body: JSON.stringify(body),
 });
 
+// Path segments come from localStorage/backend payloads — always encode so
+// a `/`, `?`, `#` or `%` in an id can't corrupt the route.
+const enc = (s: string) => encodeURIComponent(s);
+
 export const api = {
   async getWorkspaces(): Promise<Workspace[]> {
     try {
@@ -72,11 +76,11 @@ export const api = {
   },
 
   async updateWorkspace(id: string, updates: { name?: string; expanded?: boolean }): Promise<Workspace> {
-    return req<Workspace>(`/workspaces/${id}`, { ...json(updates), method: 'PUT' });
+    return req<Workspace>(`/workspaces/${enc(id)}`, { ...json(updates), method: 'PUT' });
   },
 
   async deleteWorkspace(id: string): Promise<void> {
-    await req<void>(`/workspaces/${id}`, { method: 'DELETE' });
+    await req<void>(`/workspaces/${enc(id)}`, { method: 'DELETE' });
   },
 
   async uploadDocument(
@@ -91,11 +95,12 @@ export const api = {
     if (noteTitle) formData.append('note_title', noteTitle);
 
     const doc = await req<DocumentItem>(
-      `/workspaces/${workspaceId}/documents/upload`,
+      `/workspaces/${enc(workspaceId)}/documents/upload`,
       { method: 'POST', body: formData },
       LONG_TIMEOUT_MS,
     );
-    doc.file = file;
+    // Do not attach the File here: retaining it pins full PDF bytes in
+    // memory. Callers keep the File only for local-fallback docs.
     return doc;
   },
 
@@ -103,23 +108,23 @@ export const api = {
     id: string,
     updates: { note_title?: string; tag?: string; bookmarked?: boolean }
   ): Promise<DocumentItem> {
-    return req<DocumentItem>(`/documents/${id}`, { ...json(updates), method: 'PUT' });
+    return req<DocumentItem>(`/documents/${enc(id)}`, { ...json(updates), method: 'PUT' });
   },
 
   async deleteDocument(id: string): Promise<void> {
-    await req<void>(`/documents/${id}`, { method: 'DELETE' });
+    await req<void>(`/documents/${enc(id)}`, { method: 'DELETE' });
   },
 
   async getNote(docId: string): Promise<NoteData> {
-    return req<NoteData>(`/documents/${docId}/note`);
+    return req<NoteData>(`/documents/${enc(docId)}/note`);
   },
 
   async saveNote(docId: string, content: string): Promise<NoteData> {
-    return req<NoteData>(`/documents/${docId}/note`, { ...json({ content }), method: 'PUT' });
+    return req<NoteData>(`/documents/${enc(docId)}/note`, { ...json({ content }), method: 'PUT' });
   },
 
   getDocumentFileUrl(docId: string): string {
-    return `${API_BASE}/documents/${docId}/file`;
+    return `${API_BASE}/documents/${enc(docId)}/file`;
   },
 
   // Chats are global sessions, independent of documents. A chat records an
@@ -142,7 +147,7 @@ export const api = {
 
   async getChatMessages(chatId: string): Promise<ChatMessage[]> {
     try {
-      return await req<ChatMessage[]>(`/chats/${chatId}/messages`);
+      return await req<ChatMessage[]>(`/chats/${enc(chatId)}/messages`);
     } catch {
       return [];
     }
@@ -150,7 +155,7 @@ export const api = {
 
   async sendChatMessage(chatId: string, message: string, documentIds: string[] = []): Promise<ChatMessage> {
     const data = await req<{ message: ChatMessage }>(
-      `/chats/${chatId}/messages`,
+      `/chats/${enc(chatId)}/messages`,
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -162,6 +167,6 @@ export const api = {
   },
 
   async deleteChat(chatId: string): Promise<void> {
-    await req<void>(`/chats/${chatId}`, { method: 'DELETE' });
+    await req<void>(`/chats/${enc(chatId)}`, { method: 'DELETE' });
   },
 };

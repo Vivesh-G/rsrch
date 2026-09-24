@@ -4,7 +4,7 @@ import time
 
 
 class NoteBase(BaseModel):
-    content: str = ""
+    content: str = Field(default="", max_length=200_000)
 
 
 class NoteResponse(NoteBase):
@@ -13,15 +13,15 @@ class NoteResponse(NoteBase):
 
 
 class DocumentBase(BaseModel):
-    name: str
-    note_title: Optional[str] = None
-    tag: str = "General"
+    name: str = Field(min_length=1, max_length=255)
+    note_title: Optional[str] = Field(default=None, max_length=120)
+    tag: str = Field(default="General", min_length=1, max_length=30)
     bookmarked: bool = False
 
 
 class DocumentUpdate(BaseModel):
-    note_title: Optional[str] = None
-    tag: Optional[str] = None
+    note_title: Optional[str] = Field(default=None, max_length=120)
+    tag: Optional[str] = Field(default=None, min_length=1, max_length=30)
     bookmarked: Optional[bool] = None
 
 
@@ -34,11 +34,11 @@ class DocumentResponse(DocumentBase):
 
 
 class WorkspaceBase(BaseModel):
-    name: str
+    name: str = Field(min_length=1, max_length=60)
 
 
 class WorkspaceUpdate(BaseModel):
-    name: Optional[str] = None
+    name: Optional[str] = Field(default=None, min_length=1, max_length=60)
     expanded: Optional[bool] = None
 
 
@@ -75,8 +75,8 @@ class ChatMessage(BaseModel):
 
 
 class ChatCreate(BaseModel):
-    title: Optional[str] = None
-    document_id: Optional[str] = None
+    title: Optional[str] = Field(default=None, max_length=120)
+    document_id: Optional[str] = Field(default=None, max_length=128)
 
 
 class ChatSessionResponse(BaseModel):

@@ -54,9 +54,14 @@ const readStored = <T,>(key: string, fallback: T): T => {
 function usePersistentState<T>(key: string, initial: T) {
   const [value, setValue] = useState<T>(() => readStored(key, initial));
   useEffect(() => {
-    try {
-      localStorage.setItem(key, JSON.stringify(value));
-    } catch {}
+    // Debounced so 60fps resizer ticks batch into one write instead of
+    // one synchronous localStorage I/O per animation frame.
+    const t = setTimeout(() => {
+      try {
+        localStorage.setItem(key, JSON.stringify(value));
+      } catch {}
+    }, 250);
+    return () => clearTimeout(t);
   }, [key, value]);
   return [value, setValue] as const;
 }
@@ -66,21 +71,33 @@ interface PanelWrapperProps {
   style?: React.CSSProperties;
   className?: string;
   resizer?: React.ReactNode;
+  onMove?: (id: string, dir: -1 | 1) => void;
   children: (dragHandle: React.ReactNode) => React.ReactNode;
 }
 
-const PanelWrapper = React.forwardRef<HTMLLIElement, PanelWrapperProps>(({ id, style, children, className, resizer }, ref) => {
+const PanelWrapper = React.forwardRef<HTMLLIElement, PanelWrapperProps>(({ id, style, children, className, resizer, onMove }, ref) => {
   const controls = useDragControls();
-  const dragHandleNode = (
-    <div
-      role="button"
-      tabIndex={0}
-      aria-label={`Reorder ${id} panel`}
-      onPointerDown={(e) => controls.start(e)}
-      style={{ display: 'flex', touchAction: 'none', cursor: 'grab' }}
-    >
-      <IconDragHandle />
-    </div>
+  // Memoized so child React.memo comparators see a stable reference
+  // instead of a fresh JSX node on every App render (C4).
+  const dragHandleNode = useMemo(
+    () => (
+      <div
+        role="button"
+        tabIndex={0}
+        aria-label={`Reorder ${id} panel. Press left or right arrow to move.`}
+        onPointerDown={(e) => controls.start(e)}
+        onKeyDown={(e) => {
+          if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+            e.preventDefault();
+            onMove?.(id, e.key === 'ArrowLeft' ? -1 : 1);
+          }
+        }}
+        style={{ display: 'flex', touchAction: 'none', cursor: 'grab' }}
+      >
+        <IconDragHandle />
+      </div>
+    ),
+    [id, controls, onMove]
   );
   return (
     <Reorder.Item
@@ -100,6 +117,8 @@ const PanelWrapper = React.forwardRef<HTMLLIElement, PanelWrapperProps>(({ id, s
     </Reorder.Item>
   );
 });
+
+PanelWrapper.displayName = 'PanelWrapper';
 
 export const App: React.FC = () => {
   const [workspaces, setWorkspaces] = useState<Workspace[]>([
@@ -176,6 +195,25 @@ export const App: React.FC = () => {
       return result;
     });
   }, []);
+
+  // Keyboard reorder for the drag handles (ArrowLeft/Right on focused handle).
+  const handleMovePanel = useCallback(
+    (id: string, dir: -1 | 1) => {
+      setPanelOrder((prev) => {
+        const base = Array.isArray(prev) ? [...prev] : ['viewer', 'chat', 'notes'];
+        const i = base.indexOf(id);
+        const j = i + dir;
+        if (i < 0 || j < 0 || j >= base.length) return base;
+        [base[i], base[j]] = [base[j], base[i]];
+        return base;
+      });
+    },
+    []
+  );
+
+  // Tracks the active resize's window-listener cleanup so an unmount
+  // mid-drag can't leak listeners or leave a stuck col-resize cursor.
+  const resizeCleanupRef = useRef<(() => void) | null>(null);
   
   const sidebarWidthRef = useRef(sidebarWidth);
   sidebarWidthRef.current = sidebarWidth;
@@ -199,7 +237,14 @@ export const App: React.FC = () => {
     return () => {
       if (resizeRafRef.current) cancelAnimationFrame(resizeRafRef.current);
       if (noteSaveTimerRef.current) clearTimeout(noteSaveTimerRef.current);
+      if (tagSaveTimerRef.current) clearTimeout(tagSaveTimerRef.current);
       if (saveTimeoutRef.current) clearTimeout(saveTimeoutRef.current);
+      try {
+        resizeCleanupRef.current?.();
+      } catch {}
+      resizeCleanupRef.current = null;
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
     };
   }, []);
 
@@ -297,15 +342,10 @@ export const App: React.FC = () => {
   }, []);
 
   const handleToggleWorkspaceExpand = useCallback((wsId: string) => {
-    let nextExpanded = false;
+    const current = workspacesRef.current.find((w) => w.id === wsId);
+    const nextExpanded = !(current?.expanded ?? true);
     setWorkspaces((prev) =>
-      prev.map((w) => {
-        if (w.id === wsId) {
-          nextExpanded = !w.expanded;
-          return { ...w, expanded: nextExpanded };
-        }
-        return w;
-      })
+      prev.map((w) => (w.id === wsId ? { ...w, expanded: nextExpanded } : w))
     );
     queueMicrotask(() => api.updateWorkspace(wsId, { expanded: nextExpanded }).catch(() => {}));
   }, []);
@@ -353,33 +393,29 @@ export const App: React.FC = () => {
       } catch (err) {
         console.warn('Failed to delete workspace on backend:', err);
       }
-      setWorkspaces((prev) => {
-        const next = prev.filter((w) => w.id !== wsId);
-        if (next.length === 0) {
-          const fallbackWs: Workspace = {
-            id: 'ws_default',
-            name: 'My Workspace',
-            expanded: true,
-            created_at: Date.now(),
-            docs: [],
-          };
-          queueMicrotask(() => {
-            setActiveWsId('ws_default');
-            setActiveDocId(null);
-          });
-          return [fallbackWs];
-        }
-        const deletedActive = prev.find((w) => w.id === wsId);
-        const hadActiveDoc =
-          deletedActive?.docs.some((d) => d.id === activeDocIdRef.current) ?? false;
-        queueMicrotask(() => {
-          setActiveWsId((prevActive) =>
-            prevActive === wsId ? next[0].id : prevActive
-          );
-          if (hadActiveDoc) setActiveDocId(null);
-        });
-        return next;
-      });
+      const prev = workspacesRef.current;
+      const next = prev.filter((w) => w.id !== wsId);
+      if (next.length === 0) {
+        const fallbackWs: Workspace = {
+          id: 'ws_default',
+          name: 'My Workspace',
+          expanded: true,
+          created_at: Date.now(),
+          docs: [],
+        };
+        setWorkspaces([fallbackWs]);
+        setActiveWsId('ws_default');
+        setActiveDocId(null);
+        return;
+      }
+      const deletedActive = prev.find((w) => w.id === wsId);
+      const hadActiveDoc =
+        deletedActive?.docs.some((d) => d.id === activeDocIdRef.current) ?? false;
+      setWorkspaces(next);
+      setActiveWsId((prevActive) =>
+        prevActive === wsId ? next[0].id : prevActive
+      );
+      if (hadActiveDoc) setActiveDocId(null);
     },
     []
   );
@@ -466,20 +502,33 @@ export const App: React.FC = () => {
   }, []);
 
   const handleAddFiles = useCallback(async (targetWsId: string, fileList: FileList) => {
-    const pdfFiles = Array.from(fileList).filter(
-      (f) => f.type.includes('pdf') || f.name.toLowerCase().endsWith('.pdf')
-    );
-    if (!pdfFiles.length) return;
+    const MAX_FILE_BYTES = 50 * 1024 * 1024;
+    const MAX_FILES_PER_BATCH = 10;
+    const all = Array.from(fileList);
+    const pdfFiles = all
+      .filter((f) => f.type.includes('pdf') || f.name.toLowerCase().endsWith('.pdf'))
+      .slice(0, MAX_FILES_PER_BATCH);
+    const oversized = pdfFiles.filter((f) => f.size > MAX_FILE_BYTES).map((f) => f.name);
+    const files = pdfFiles.filter((f) => f.size <= MAX_FILE_BYTES);
+    if (oversized.length) {
+      console.warn(`Skipped ${oversized.length} file(s) over 50MB:`, oversized);
+    }
+    if (all.length > files.length + oversized.length) {
+      console.warn('Some files were skipped (non-PDF or over the 10-file batch limit).');
+    }
+    if (!files.length) return;
 
     // Upload all, then commit once: previously each file fired its own
     // setWorkspaces + activation, flickering through every intermediate doc.
     const added: DocumentItem[] = [];
     const notes: Record<string, string> = {};
-    for (const file of pdfFiles) {
+    for (const file of files) {
       try {
-        const newDoc = await api.uploadDocument(targetWsId, file, 'General', baseName(file.name));
-        newDoc.file = file;
-        added.push(newDoc);
+        const uploaded = await api.uploadDocument(targetWsId, file, 'General', baseName(file.name));
+        // Do not retain the File on successful uploads: the viewer can
+        // stream via getDocumentFileUrl(). Keeping every File in
+        // workspaces state pins full PDF bytes in memory.
+        added.push(uploaded);
       } catch (err) {
         console.warn('Backend upload failed, adding locally:', err);
         added.push({
@@ -535,20 +584,17 @@ export const App: React.FC = () => {
   // Document Attribute Modifications — stable callbacks so memoized
   // DocViewer/Sidebar don't re-render; network writes are debounced.
   const handleToggleBookmark = useCallback((docId: string) => {
-    let nextBm = false;
+    const current = workspacesRef.current
+      .flatMap((w) => w.docs)
+      .find((d) => d.id === docId);
+    const nextBm = !(current?.bookmarked ?? false);
     setWorkspaces((prev) =>
       prev.map((w) => ({
         ...w,
-        docs: w.docs.map((d) => {
-          if (d.id === docId) {
-            nextBm = !d.bookmarked;
-            return { ...d, bookmarked: nextBm };
-          }
-          return d;
-        }),
+        docs: w.docs.map((d) => (d.id === docId ? { ...d, bookmarked: nextBm } : d)),
       }))
     );
-    // Fire-and-forget outside the updater (updater must stay pure)
+    // Fire-and-forget outside the updater (updater stays pure)
     queueMicrotask(() => api.updateDocument(docId, { bookmarked: nextBm }).catch(() => {}));
   }, []);
 
@@ -690,29 +736,48 @@ export const App: React.FC = () => {
       max: number
     ) => (e: React.MouseEvent) => {
       e.preventDefault();
-      document.body.style.cursor = 'col-resize';
-      document.body.style.userSelect = 'none';
       const startX = e.clientX;
       const startWidth = widthRef.current;
+      document.body.style.cursor = 'col-resize';
+      document.body.style.userSelect = 'none';
 
-      const onMouseMove = (moveEvent: MouseEvent) => {
+      const onMove = (clientX: number) => {
         if (resizeRafRef.current) return;
         resizeRafRef.current = requestAnimationFrame(() => {
           resizeRafRef.current = 0;
-          const delta = (moveEvent.clientX - startX) * direction;
+          const delta = (clientX - startX) * direction;
           setWidth(Math.min(max, Math.max(min, startWidth + delta)));
         });
       };
-      const onMouseUp = () => {
+      const onMouseMove = (moveEvent: MouseEvent) => onMove(moveEvent.clientX);
+      const onTouchMove = (te: TouchEvent) => {
+        if (te.touches.length > 0) {
+          if (te.cancelable) te.preventDefault();
+          onMove(te.touches[0].clientX);
+        }
+      };
+      const onKeyCancel = (ke: KeyboardEvent) => {
+        if (ke.key === 'Escape') cleanup();
+      };
+      const cleanup = () => {
         if (resizeRafRef.current) cancelAnimationFrame(resizeRafRef.current);
         resizeRafRef.current = 0;
         document.body.style.cursor = '';
         document.body.style.userSelect = '';
         window.removeEventListener('mousemove', onMouseMove);
-        window.removeEventListener('mouseup', onMouseUp);
+        window.removeEventListener('mouseup', cleanup);
+        window.removeEventListener('touchmove', onTouchMove);
+        window.removeEventListener('touchend', cleanup);
+        window.removeEventListener('keydown', onKeyCancel);
+        if (resizeCleanupRef.current === cleanup) resizeCleanupRef.current = null;
       };
+      resizeCleanupRef.current?.();
+      resizeCleanupRef.current = cleanup;
       window.addEventListener('mousemove', onMouseMove);
-      window.addEventListener('mouseup', onMouseUp);
+      window.addEventListener('mouseup', cleanup);
+      window.addEventListener('touchmove', onTouchMove, { passive: false });
+      window.addEventListener('touchend', cleanup);
+      window.addEventListener('keydown', onKeyCancel);
     },
     []
   );
@@ -746,23 +811,31 @@ export const App: React.FC = () => {
   const handlePanelResize = useCallback(
     (leftId: string, rightId: string) => (e: React.MouseEvent) => {
       e.preventDefault();
-      document.body.style.cursor = 'col-resize';
-      document.body.style.userSelect = 'none';
 
+      // Look up first: a missing element must no-op WITHOUT leaving a
+      // stuck col-resize cursor (C2).
       const leftEl = document.getElementById(leftId);
       const rightEl = document.getElementById(rightId);
       if (!leftEl || !rightEl) return;
 
+      document.body.style.cursor = 'col-resize';
+      document.body.style.userSelect = 'none';
+
       const startLeftW = leftEl.getBoundingClientRect().width;
       const startRightW = rightEl.getBoundingClientRect().width;
       const totalW = startLeftW + startRightW;
+      if (totalW <= 0) {
+        document.body.style.cursor = '';
+        document.body.style.userSelect = '';
+        return;
+      }
       const startX = e.clientX;
 
-      const onMouseMove = (moveEvent: MouseEvent) => {
+      const onMove = (clientX: number) => {
         if (resizeRafRef.current) return;
         resizeRafRef.current = requestAnimationFrame(() => {
           resizeRafRef.current = 0;
-          const delta = moveEvent.clientX - startX;
+          const delta = clientX - startX;
           const screen30Percent = window.innerWidth * 0.3;
 
           const minLeftW = leftId === 'viewer'
@@ -775,33 +848,79 @@ export const App: React.FC = () => {
           const newLeftW = Math.max(minLeftW, Math.min(totalW - minRightW, startLeftW + delta));
           const newRightW = totalW - newLeftW;
 
-          setPanelWeights((prev) => ({
-            ...prev,
-            [leftId]: (newLeftW / totalW) * 2,
-            [rightId]: (newRightW / totalW) * 2,
-          }));
+          // Preserve the pair's share of total weight so a third panel
+          // is unaffected (C1): previously `* 2` assumed exactly 2 panels.
+          setPanelWeights((prev) => {
+            const pairSum = (prev[leftId] ?? 1) + (prev[rightId] ?? 1);
+            return {
+              ...prev,
+              [leftId]: (newLeftW / totalW) * pairSum,
+              [rightId]: (newRightW / totalW) * pairSum,
+            };
+          });
         });
       };
+      const onMouseMove = (moveEvent: MouseEvent) => onMove(moveEvent.clientX);
+      const onTouchMove = (te: TouchEvent) => {
+        if (te.touches.length > 0) {
+          if (te.cancelable) te.preventDefault();
+          onMove(te.touches[0].clientX);
+        }
+      };
+      const onKeyCancel = (ke: KeyboardEvent) => {
+        if (ke.key === 'Escape') cleanup();
+      };
 
-      const onMouseUp = () => {
+      const cleanup = () => {
         if (resizeRafRef.current) cancelAnimationFrame(resizeRafRef.current);
         resizeRafRef.current = 0;
         document.body.style.cursor = '';
         document.body.style.userSelect = '';
         window.removeEventListener('mousemove', onMouseMove);
-        window.removeEventListener('mouseup', onMouseUp);
+        window.removeEventListener('mouseup', cleanup);
+        window.removeEventListener('touchmove', onTouchMove);
+        window.removeEventListener('touchend', cleanup);
+        window.removeEventListener('keydown', onKeyCancel);
+        if (resizeCleanupRef.current === cleanup) resizeCleanupRef.current = null;
       };
 
+      resizeCleanupRef.current?.();
+      resizeCleanupRef.current = cleanup;
       window.addEventListener('mousemove', onMouseMove);
-      window.addEventListener('mouseup', onMouseUp);
+      window.addEventListener('mouseup', cleanup);
+      window.addEventListener('touchmove', onTouchMove, { passive: false });
+      window.addEventListener('touchend', cleanup);
+      window.addEventListener('keydown', onKeyCancel);
+    },
+    []
+  );
+
+  const nudgeSidebarWidth = useCallback(
+    (delta: number) => {
+      setSidebarWidth((w) => Math.min(420, Math.max(180, w + delta)));
+    },
+    []
+  );
+
+  const nudgePanelPair = useCallback(
+    (leftId: string, rightId: string) => (delta: number) => {
+      // Keyboard equivalent of dragging the pair resizer ~16px.
+      const totalW = window.innerWidth || 1200;
+      setPanelWeights((prev) => {
+        const l = prev[leftId] ?? 1;
+        const r = prev[rightId] ?? 1;
+        const pairSum = l + r;
+        const frac = delta / Math.max(totalW, 1);
+        const nl = Math.min(pairSum - 0.2, Math.max(0.2, l + frac * pairSum));
+        return { ...prev, [leftId]: nl, [rightId]: pairSum - nl };
+      });
     },
     []
   );
 
   // Stable render callbacks + memoized styles: previously every App
   // render created new closures/objects, defeating memoization below.
-  const handleNewDocument = useCallback(() => openFilePicker(activeWsIdRef.current), [openFilePicker]);
-  const handleSelectOverview = useCallback(() => setActiveDocId(null), []);
+  const handleNewDocument = useCallback(() => openFilePicker(activeWsIdRef.current), [openFilePicker]);  const handleSelectOverview = useCallback(() => setActiveDocId(null), []);
 
   const handleToggleViewer = useCallback(() => {
     setIsViewerOpen((v) => !v);
@@ -907,7 +1026,12 @@ export const App: React.FC = () => {
           onDeleteDoc={handleDeleteDoc2}
           onRenameDoc={handleRenameDoc}
         />
-        <Resizer id="resizer1" onMouseDown={handleResizer1MouseDown} />
+        <Resizer
+          id="resizer1"
+          onMouseDown={handleResizer1MouseDown}
+          ariaLabel="Resize workspace sidebar"
+          onNudge={nudgeSidebarWidth}
+        />
 
         {visibleOrder.length === 0 ? (
           <div className="all-panels-docked" id="allPanelsDocked">
@@ -949,6 +1073,8 @@ export const App: React.FC = () => {
                 <Resizer
                   id={`resizer-${visibleOrder[idx - 1]}-${panelId}`}
                   onMouseDown={handlePanelResize(visibleOrder[idx - 1], panelId)}
+                  ariaLabel={`Resize ${visibleOrder[idx - 1]} and ${panelId} panels`}
+                  onNudge={nudgePanelPair(visibleOrder[idx - 1], panelId)}
                 />
               ) : null;
 
@@ -960,6 +1086,7 @@ export const App: React.FC = () => {
                     style={{ ...panelFlexStyle, zIndex: 0 }}
                     className="viewer"
                     resizer={resizerNode}
+                    onMove={handleMovePanel}
                   >
                     {(dragHandle: React.ReactNode) => (
                       <div style={{ flex: 1, display: 'flex', flexDirection: 'column', height: '100%' }}>
@@ -1009,6 +1136,7 @@ export const App: React.FC = () => {
                     id="chat"
                     style={panelFlexStyle}
                     resizer={resizerNode}
+                    onMove={handleMovePanel}
                   >
                     {(dragHandle: React.ReactNode) => (
                       <ErrorBoundary
@@ -1035,6 +1163,7 @@ export const App: React.FC = () => {
                     id="notes"
                     style={panelFlexStyle}
                     resizer={resizerNode}
+                    onMove={handleMovePanel}
                   >
                     {(dragHandle: React.ReactNode) => (
                       <ErrorBoundary

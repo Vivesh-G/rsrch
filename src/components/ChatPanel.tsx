@@ -31,8 +31,14 @@ const readStored = <T,>(key: string, fallback: T): T => {
   }
 };
 
-const fmtWhen = (sec: number) =>
-  new Date(sec * 1000).toLocaleString('en-US', {
+const toMs = (ts: number): number => {
+  if (!Number.isFinite(ts)) return Date.now();
+  // Backend stores seconds (time.time()); accept ms defensively.
+  return ts > 1e11 ? ts : ts * 1000;
+};
+
+const fmtWhen = (ts: number) =>
+  new Date(toMs(ts)).toLocaleString('en-US', {
     month: 'short',
     day: 'numeric',
     hour: 'numeric',
@@ -143,6 +149,10 @@ const ChatPanelInner = ({ activeDocId, activeDocTitle, resolveDocTitle, style, d
     setActiveChatId(chat.id);
     setView('chat');
     setConfirmDeleteId(null);
+    // Clear stale messages immediately so the previous chat doesn't flash
+    // while history loads (C8).
+    setMessages([]);
+    setIsWaiting(true);
     try {
       const history = await api.getChatMessages(chat.id);
       if (activeChatIdRef.current !== chat.id) return; // superseded
@@ -155,6 +165,16 @@ const ChatPanelInner = ({ activeDocId, activeDocTitle, resolveDocTitle, style, d
       scrollToBottom();
     } catch (err) {
       console.warn('Failed to fetch chat messages:', err);
+      if (activeChatIdRef.current !== chat.id) return;
+      setMessages([
+        {
+          role: 'assistant',
+          content: 'Could not load this chat. Please try again.',
+          created_at: Date.now() / 1000,
+        },
+      ]);
+    } finally {
+      if (activeChatIdRef.current === chat.id) setIsWaiting(false);
     }
   }, [scrollToBottom]);
 
@@ -200,7 +220,7 @@ const ChatPanelInner = ({ activeDocId, activeDocTitle, resolveDocTitle, style, d
     e.preventDefault();
     if (!input.trim() || isWaiting) return;
 
-    const text = input.trim();
+    const text = input.trim().slice(0, 4000);
     const userMessage: ChatMessage = {
       role: 'user',
       content: text,
@@ -224,6 +244,16 @@ const ChatPanelInner = ({ activeDocId, activeDocTitle, resolveDocTitle, style, d
       setMessages((prev) => [...prev, responseMsg]);
     } catch (err) {
       console.error('Chat error:', err);
+      // Surface failures in-thread (C7): the optimistic user bubble would
+      // otherwise hang with no reply and no retry affordance.
+      setMessages((prev) => [
+        ...prev,
+        {
+          role: 'assistant',
+          content: 'Send failed — please check your connection and try again.',
+          created_at: Date.now() / 1000,
+        },
+      ]);
     } finally {
       setIsWaiting(false);
       scrollToBottom();
@@ -252,10 +282,10 @@ const ChatPanelInner = ({ activeDocId, activeDocTitle, resolveDocTitle, style, d
           <div className="chat-header-actions">
             {view !== 'history' && (
               <>
-                <button className="icon-btn small" title="View past chats" onClick={() => { setView('history'); setConfirmDeleteId(null); }} type="button">
+                <button className="icon-btn small" title="View past chats" aria-label="View past chats" onClick={() => { setView('history'); setConfirmDeleteId(null); }} type="button">
                   <IconDoc size={13} />
                 </button>
-                <button className="icon-btn small" title="Start a new blank chat" onClick={startBlank} type="button">
+                <button className="icon-btn small" title="Start a new blank chat" aria-label="Start a new blank chat" onClick={startBlank} type="button">
                   <IconPlus size={12} />
                 </button>
               </>
@@ -265,6 +295,7 @@ const ChatPanelInner = ({ activeDocId, activeDocTitle, resolveDocTitle, style, d
                 className="icon-btn small panel-close-btn"
                 id="closeChatBtn"
                 title="Close Chat panel (move to right sidebar)"
+                aria-label="Close Chat panel"
                 onClick={onClose}
                 type="button"
               >
@@ -295,6 +326,7 @@ const ChatPanelInner = ({ activeDocId, activeDocTitle, resolveDocTitle, style, d
                   <button
                     className={`icon-btn small tool-delete ${confirmDeleteId === c.id ? 'confirming' : ''}`}
                     title={confirmDeleteId === c.id ? 'Click again to confirm delete' : `Delete "${c.title}"`}
+                    aria-label={confirmDeleteId === c.id ? `Confirm delete "${c.title}"` : `Delete "${c.title}"`}
                     onClick={(e) => { e.stopPropagation(); void handleDelete(c.id); }}
                     type="button"
                   >
@@ -333,8 +365,10 @@ const ChatPanelInner = ({ activeDocId, activeDocTitle, resolveDocTitle, style, d
                 type="text"
                 className="chat-input"
                 placeholder={attachedIds.length > 0 ? 'Ask about the attached PDFs...' : 'Ask anything...'}
+                aria-label="Chat message"
                 value={input}
-                onChange={(e) => setInput(e.target.value)}
+                onChange={(e) => setInput(e.target.value.slice(0, 4000))}
+                maxLength={4000}
                 disabled={isWaiting}
               />
               <button type="submit" className="chat-send-btn pill-btn" disabled={!input.trim() || isWaiting}>

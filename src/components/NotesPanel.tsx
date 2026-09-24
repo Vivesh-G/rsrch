@@ -25,6 +25,7 @@ interface NotesPanelProps {
 }
 
 const PRESET_TAGS = ['General', 'NLP', 'Architecture', 'Foundations', 'Strategy', 'ML'];
+const MAX_TAG_LEN = 30;
 
 function tagClass(tag?: string): string {
   const key = (tag || '').toLowerCase();
@@ -42,7 +43,8 @@ function tagClass(tag?: string): string {
 
 function getDocDate(d?: DocumentItem | null): string {
   if (d?.added_at) {
-    const ms = d.added_at > 1e11 ? d.added_at : d.added_at * 1000;
+    const v = d.added_at;
+    const ms = Number.isFinite(v) ? (v > 1e11 ? v : v * 1000) : Date.now();
     return new Date(ms).toLocaleDateString('en-US', {
       month: 'short',
       day: 'numeric',
@@ -94,7 +96,9 @@ const NotesPanelInner: React.FC<NotesPanelProps> = ({
   }, [isTagMenuOpen]);
 
   const handleSelectTag = (tag: string) => {
-    onTagChange(tag);
+    const clean = tag.trim().slice(0, MAX_TAG_LEN);
+    if (!clean) return;
+    onTagChange(clean);
     setIsTagMenuOpen(false);
     setCustomTagInput('');
   };
@@ -140,6 +144,7 @@ const NotesPanelInner: React.FC<NotesPanelProps> = ({
             className="icon-btn small panel-close-btn notes-placeholder-close"
             id="closeInactiveNotesBtn"
             title="Close Notes panel (move to right sidebar)"
+            aria-label="Close Notes panel"
             onClick={onClose}
             type="button"
           >
@@ -172,6 +177,7 @@ const NotesPanelInner: React.FC<NotesPanelProps> = ({
               className={`icon-btn small save-btn ${saveStatus === 'saved' ? 'is-saved' : ''}`}
               id="saveBtn"
               title="Save note (Ctrl+S)"
+              aria-label="Save note"
               onClick={() => onManualSave?.(noteContent)}
               type="button"
             >
@@ -181,6 +187,7 @@ const NotesPanelInner: React.FC<NotesPanelProps> = ({
               className="icon-btn small"
               id="downloadNoteBtn"
               title="Download note as Markdown"
+              aria-label="Download note as Markdown"
               onClick={handleDownloadNote}
               type="button"
             >
@@ -191,6 +198,7 @@ const NotesPanelInner: React.FC<NotesPanelProps> = ({
                 className="icon-btn small panel-close-btn"
                 id="closeNotesBtn"
                 title="Close Notes panel (move to right sidebar)"
+                aria-label="Close Notes panel"
                 onClick={onClose}
                 type="button"
               >
@@ -246,11 +254,13 @@ const NotesPanelInner: React.FC<NotesPanelProps> = ({
                   <input
                     type="text"
                     placeholder="Custom tag…"
+                    aria-label="Custom tag"
                     value={customTagInput}
-                    onChange={(e) => setCustomTagInput(e.target.value)}
+                    onChange={(e) => setCustomTagInput(e.target.value.slice(0, MAX_TAG_LEN))}
+                    maxLength={MAX_TAG_LEN}
                     autoFocus
                   />
-                  <button type="submit" title="Add custom tag">
+                  <button type="submit" title="Add custom tag" aria-label="Add custom tag">
                     <IconPlus size={12} />
                   </button>
                 </form>
