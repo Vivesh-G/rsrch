@@ -9,8 +9,9 @@ import { NotesPanel } from './components/NotesPanel';
 import { ChatPanel, PERSISTED_CHAT_KEY } from './components/ChatPanel';
 import { ConfirmModal, NewWorkspaceModal } from './components/Modals';
 import { ErrorBoundary } from './components/ErrorBoundary';
+import { RightSidebar } from './components/RightSidebar';
 import { Reorder, useDragControls } from 'framer-motion';
-import { IconDragHandle } from './components/Icons';
+import { IconDragHandle, IconDoc, IconChat, IconPencil, IconBook } from './components/Icons';
 import './index.css';
 
 // Code-split the heavy PDF viewer (pdfjs-dist ~800KB) so initial load
@@ -36,6 +37,7 @@ const baseName = (n?: string) => (n || '').replace(/\.pdf$/i, '');
 // contents, so pass this instead of notesCache to keep its memo from
 // invalidating (and re-rendering every row) on each note keystroke.
 const EMPTY_NOTES_CACHE: Record<string, string> = {};
+const FULL_PANEL_STYLE: React.CSSProperties = { width: '100%', height: '100%' };
 
 // UI state that survives refresh (selection, layout, panel visibility).
 // Stored as JSON; anything unreadable falls back silently.
@@ -64,11 +66,10 @@ interface PanelWrapperProps {
   style?: React.CSSProperties;
   className?: string;
   resizer?: React.ReactNode;
-  resizerPosition?: 'left' | 'right';
   children: (dragHandle: React.ReactNode) => React.ReactNode;
 }
 
-const PanelWrapper = React.forwardRef<HTMLLIElement, PanelWrapperProps>(({ id, style, children, className, resizer, resizerPosition }, ref) => {
+const PanelWrapper = React.forwardRef<HTMLLIElement, PanelWrapperProps>(({ id, style, children, className, resizer }, ref) => {
   const controls = useDragControls();
   const dragHandleNode = (
     <div
@@ -92,11 +93,10 @@ const PanelWrapper = React.forwardRef<HTMLLIElement, PanelWrapperProps>(({ id, s
       className={className}
       layout="position"
     >
-      {resizerPosition === 'left' && resizer}
+      {resizer}
       <div style={{ flex: 1, display: 'flex', minWidth: 0, flexDirection: 'column', height: '100%' }}>
         {children(dragHandleNode)}
       </div>
-      {resizerPosition === 'right' && resizer}
     </Reorder.Item>
   );
 });
@@ -124,9 +124,10 @@ export const App: React.FC = () => {
   const saveTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const [sidebarWidth, setSidebarWidth] = usePersistentState<number>('rschr-sidew', 240);
-  const [notesWidth, setNotesWidth] = usePersistentState<number>('rschr-notesw', 400);
-  const [chatWidth, setChatWidth] = usePersistentState<number>('rschr-chatw', 300);
+  const [isViewerOpen, setIsViewerOpen] = usePersistentState<boolean>('rschr-viewer-open', true);
   const [isChatOpen, setIsChatOpen] = usePersistentState<boolean>('rschr-chat-open', false);
+  const [isNotesOpen, setIsNotesOpen] = usePersistentState<boolean>('rschr-notes-open', true);
+  const [rightSidebarCollapsed, setRightSidebarCollapsed] = usePersistentState<boolean>('rschr-right-sidecol', false);
   const PANEL_IDS = useMemo(() => ['viewer', 'chat', 'notes'] as string[], []);
   const [panelOrderRaw, setPanelOrder] = usePersistentState<string[]>('rschr-panel-order', ['viewer', 'chat', 'notes']);
   // Sanitize persisted order: drop unknowns/'sidebar', dedupe, append missing
@@ -142,11 +143,17 @@ export const App: React.FC = () => {
     return clean;
   }, [panelOrderRaw, PANEL_IDS]);
   // Visible subset must match rendered Items 1:1 — Group `values` + map must
-  // use this, never the full order (hidden chat would otherwise desync and
-  // onReorder would persist a list missing 'chat', losing it permanently).
+  // use this, never the full order (hidden panels would otherwise desync and
+  // onReorder would persist a list missing them, losing them permanently).
   const visibleOrder = useMemo(
-    () => panelOrder.filter((p) => p !== 'chat' || isChatOpen),
-    [panelOrder, isChatOpen]
+    () =>
+      panelOrder.filter((p) => {
+        if (p === 'viewer') return isViewerOpen;
+        if (p === 'chat') return isChatOpen;
+        if (p === 'notes') return isNotesOpen;
+        return false;
+      }),
+    [panelOrder, isViewerOpen, isChatOpen, isNotesOpen]
   );
   // Merge a visible-only reorder back into the full order, preserving the
   // previous index of hidden panels so reopening lands where it was.
@@ -172,8 +179,6 @@ export const App: React.FC = () => {
   
   const sidebarWidthRef = useRef(sidebarWidth);
   sidebarWidthRef.current = sidebarWidth;
-  const chatWidthRef = useRef(chatWidth);
-  chatWidthRef.current = chatWidth;
   // Deferred query lets the search input stay at 60fps while heavy
   // sidebar/overview filtering renders at lower priority.
   const deferredSearchQuery = useDeferredValue(searchQuery);
@@ -187,8 +192,6 @@ export const App: React.FC = () => {
   notesCacheRef.current = notesCache;
   const activeDocIdRef = useRef<string | null>(null);
   activeDocIdRef.current = activeDocId;
-  const notesWidthRef = useRef(notesWidth);
-  notesWidthRef.current = notesWidth;
   const workspacesRef = useRef(workspaces);
   workspacesRef.current = workspaces;
 
@@ -714,39 +717,100 @@ export const App: React.FC = () => {
     []
   );
 
-  const getResizeDirection = useCallback((panelId: string) => {
-    const viewerIndex = panelOrder.indexOf('viewer');
-    const panelIndex = panelOrder.indexOf(panelId);
-    return panelIndex < viewerIndex ? 1 : -1;
-  }, [panelOrder]);
-
   const handleResizer1MouseDown = useCallback(
     (e: React.MouseEvent) => {
       if (sidebarCollapsed) return;
-      createResizeHandler(setSidebarWidth, sidebarWidthRef, getResizeDirection('sidebar'), 180, 420)(e);
+      createResizeHandler(setSidebarWidth, sidebarWidthRef, 1, 180, 420)(e);
     },
-    [sidebarCollapsed, createResizeHandler, getResizeDirection]
+    [sidebarCollapsed, createResizeHandler]
   );
 
-  const handleResizer2MouseDown = useCallback(
-    (e: React.MouseEvent) => {
-      createResizeHandler(setNotesWidth, notesWidthRef, getResizeDirection('notes'), 280, 720)(e);
-    },
-    [createResizeHandler, getResizeDirection]
-  );
+  const [panelWeights, setPanelWeights] = useState<Record<string, number>>({
+    viewer: 1,
+    chat: 1,
+    notes: 1,
+  });
 
-  const handleResizerChatMouseDown = useCallback(
-    (e: React.MouseEvent) => {
-      createResizeHandler(setChatWidth, chatWidthRef, getResizeDirection('chat'), 250, 600)(e);
+  // Whenever the count of visible panels changes, reset weights to 1 so space is divided evenly:
+  // 1 panel -> 100% full screen
+  // 2 panels -> 50% / 50% split
+  // 3 panels -> 33.33% / 33.33% / 33.33% split
+  const prevVisibleCountRef = useRef(visibleOrder.length);
+  useEffect(() => {
+    if (prevVisibleCountRef.current !== visibleOrder.length) {
+      prevVisibleCountRef.current = visibleOrder.length;
+      setPanelWeights({ viewer: 1, chat: 1, notes: 1 });
+    }
+  }, [visibleOrder.length]);
+
+  const handlePanelResize = useCallback(
+    (leftId: string, rightId: string) => (e: React.MouseEvent) => {
+      e.preventDefault();
+      document.body.style.cursor = 'col-resize';
+      document.body.style.userSelect = 'none';
+
+      const leftEl = document.getElementById(leftId);
+      const rightEl = document.getElementById(rightId);
+      if (!leftEl || !rightEl) return;
+
+      const startLeftW = leftEl.getBoundingClientRect().width;
+      const startRightW = rightEl.getBoundingClientRect().width;
+      const totalW = startLeftW + startRightW;
+      const startX = e.clientX;
+
+      const onMouseMove = (moveEvent: MouseEvent) => {
+        if (resizeRafRef.current) return;
+        resizeRafRef.current = requestAnimationFrame(() => {
+          resizeRafRef.current = 0;
+          const delta = moveEvent.clientX - startX;
+          const screen30Percent = window.innerWidth * 0.3;
+
+          const minLeftW = leftId === 'viewer'
+            ? Math.min(screen30Percent, totalW - 160)
+            : 160;
+          const minRightW = rightId === 'viewer'
+            ? Math.min(screen30Percent, totalW - 160)
+            : 160;
+
+          const newLeftW = Math.max(minLeftW, Math.min(totalW - minRightW, startLeftW + delta));
+          const newRightW = totalW - newLeftW;
+
+          setPanelWeights((prev) => ({
+            ...prev,
+            [leftId]: (newLeftW / totalW) * 2,
+            [rightId]: (newRightW / totalW) * 2,
+          }));
+        });
+      };
+
+      const onMouseUp = () => {
+        if (resizeRafRef.current) cancelAnimationFrame(resizeRafRef.current);
+        resizeRafRef.current = 0;
+        document.body.style.cursor = '';
+        document.body.style.userSelect = '';
+        window.removeEventListener('mousemove', onMouseMove);
+        window.removeEventListener('mouseup', onMouseUp);
+      };
+
+      window.addEventListener('mousemove', onMouseMove);
+      window.addEventListener('mouseup', onMouseUp);
     },
-    [createResizeHandler, getResizeDirection]
+    []
   );
 
   // Stable render callbacks + memoized styles: previously every App
   // render created new closures/objects, defeating memoization below.
   const handleNewDocument = useCallback(() => openFilePicker(activeWsIdRef.current), [openFilePicker]);
   const handleSelectOverview = useCallback(() => setActiveDocId(null), []);
-  // Closing the panel intentionally clears the persisted open-chat id, so
+
+  const handleToggleViewer = useCallback(() => {
+    setIsViewerOpen((v) => !v);
+  }, [setIsViewerOpen]);
+  const handleCloseViewer = useCallback(() => {
+    setIsViewerOpen(false);
+  }, [setIsViewerOpen]);
+
+  // Closing the chat panel intentionally clears the persisted open-chat id, so
   // a toggle always lands on a blank draft while a refresh restores the
   // chat (refresh never runs this handler).
   const handleToggleChat = useCallback(() => {
@@ -758,7 +822,25 @@ export const App: React.FC = () => {
       }
       return !v;
     });
-  }, []);
+  }, [setIsChatOpen]);
+  const handleCloseChat = useCallback(() => {
+    setIsChatOpen(false);
+    try {
+      localStorage.removeItem(PERSISTED_CHAT_KEY);
+    } catch {}
+  }, [setIsChatOpen]);
+
+  const handleToggleNotes = useCallback(() => {
+    setIsNotesOpen((v) => !v);
+  }, [setIsNotesOpen]);
+  const handleCloseNotes = useCallback(() => {
+    setIsNotesOpen(false);
+  }, [setIsNotesOpen]);
+
+  const handleToggleRightSidebar = useCallback(() => {
+    setRightSidebarCollapsed((v) => !v);
+  }, [setRightSidebarCollapsed]);
+
   const handleSearchChange = useCallback((q: string) => setSearchQuery(q), []);
   const handleAddDocToWorkspace = useCallback(
     (wsId: string) => openFilePicker(wsId),
@@ -785,8 +867,6 @@ export const App: React.FC = () => {
     () => ({ width: sidebarCollapsed ? undefined : `${sidebarWidth}px` }),
     [sidebarCollapsed, sidebarWidth]
   );
-  const notesStyle = useMemo(() => ({ width: `${notesWidth}px`, height: '100%' }), [notesWidth]);
-  const chatStyle = useMemo(() => ({ width: `${chatWidth}px`, height: '100%' }), [chatWidth]);
   const noteContent = activeDocId ? notesCache[activeDocId] || '' : '';
   // Sidebar only scans note bodies while a query is active; otherwise hand
   // it a stable empty object so note keystrokes don't re-render the tree.
@@ -804,7 +884,7 @@ export const App: React.FC = () => {
       />
 
       <div
-        className={`main ${sidebarCollapsed ? 'sidebar-collapsed' : ''}`}
+        className={`main ${sidebarCollapsed ? 'sidebar-collapsed' : ''} ${rightSidebarCollapsed ? 'right-sidebar-collapsed' : ''}`}
         id="main"
         ref={mainRef as any}
         style={{ display: 'flex', flexDirection: 'row', width: '100%', overflow: 'hidden' }}
@@ -829,106 +909,170 @@ export const App: React.FC = () => {
         />
         <Resizer id="resizer1" onMouseDown={handleResizer1MouseDown} />
 
-        <Reorder.Group
-          axis="x"
-          values={visibleOrder}
-          onReorder={handleReorder}
-          style={{ display: 'flex', flexDirection: 'row', flex: 1, minWidth: 0, height: '100%', padding: 0, margin: 0, listStyle: 'none' }}
-        >
-          {visibleOrder.map((panelId) => {
-            
-            const dir = getResizeDirection(panelId);
-            const resizerPosition = dir === 1 ? 'right' : 'left';
-            
-            if (panelId === 'viewer') {
-            return (
-              <PanelWrapper key="viewer" id="viewer" style={{ flex: '1 1 0', minWidth: 0, zIndex: 0 }} className="viewer" resizer={null}>
-                {(dragHandle: React.ReactNode) => (
-                  <div style={{ flex: 1, display: 'flex', flexDirection: 'column', height: '100%' }}>
-                    {!activeDocId ? (
-                      <WorkspaceOverview
-                        workspace={activeWorkspace}
-                        searchQuery={deferredSearchQuery}
-                        notesCache={sidebarNotesCache}
-                        onAddPdf={handleNewDocument}
-                        onSelectDoc={handleSelectDoc}
-                        onDeleteDoc={handleDeleteDoc2}
-                        onDeleteWorkspace={requestDeleteWorkspace}
-                        onRenameDoc={handleRenameDoc}
-                        dragHandle={dragHandle}
-                      />
-                    ) : (
-                      <ErrorBoundary
-                        resetKey={activeDocId}
-                        fallback={<div className="pdf-loading-spinner"><span>This document couldn't be displayed.</span></div>}
-                      >
-                        <Suspense
-                          fallback={<div className="pdf-loading-spinner"><span>Loading viewer…</span></div>}
-                        >
-                          <DocViewer
-                            doc={activeDoc}
-                            onToggleBookmark={handleToggleBookmark}
-                            onDeleteDoc={handleDeleteDoc1}
-                            onDropFiles={handleDropFiles}
-                            onAddToNote={handleAddToNoteFromPdf}
+        {visibleOrder.length === 0 ? (
+          <div className="all-panels-docked" id="allPanelsDocked">
+            <div className="panel-empty-icon">
+              <IconBook size={44} />
+            </div>
+            <h3>All panels are docked</h3>
+            <p>Select any tool from the right sidebar to open PDF Viewer, AI Chat, or Notes.</p>
+            <div style={{ display: 'flex', gap: '8px', marginTop: '8px', flexWrap: 'wrap', justifyContent: 'center' }}>
+              <button className="pill-btn add-btn" onClick={handleToggleViewer} type="button">
+                <IconDoc size={13} />
+                <span>Open PDF Viewer</span>
+              </button>
+              <button className="pill-btn" onClick={handleToggleChat} type="button">
+                <IconChat size={13} />
+                <span>Open AI Chat</span>
+              </button>
+              <button className="pill-btn" onClick={handleToggleNotes} type="button">
+                <IconPencil size={13} />
+                <span>Open Notes</span>
+              </button>
+            </div>
+          </div>
+        ) : (
+          <Reorder.Group
+            axis="x"
+            values={visibleOrder}
+            onReorder={handleReorder}
+            style={{ display: 'flex', flexDirection: 'row', flex: 1, minWidth: 0, height: '100%', padding: 0, margin: 0, listStyle: 'none' }}
+          >
+            {visibleOrder.map((panelId, idx) => {
+              const panelFlexStyle: React.CSSProperties = {
+                flex: `${panelWeights[panelId] ?? 1} 1 0`,
+                minWidth: 0,
+                width: '100%',
+                height: '100%',
+              };
+              const resizerNode = idx > 0 ? (
+                <Resizer
+                  id={`resizer-${visibleOrder[idx - 1]}-${panelId}`}
+                  onMouseDown={handlePanelResize(visibleOrder[idx - 1], panelId)}
+                />
+              ) : null;
+
+              if (panelId === 'viewer') {
+                return (
+                  <PanelWrapper
+                    key="viewer"
+                    id="viewer"
+                    style={{ ...panelFlexStyle, zIndex: 0 }}
+                    className="viewer"
+                    resizer={resizerNode}
+                  >
+                    {(dragHandle: React.ReactNode) => (
+                      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', height: '100%' }}>
+                        {!activeDocId ? (
+                          <WorkspaceOverview
+                            workspace={activeWorkspace}
+                            searchQuery={deferredSearchQuery}
+                            notesCache={sidebarNotesCache}
+                            onAddPdf={handleNewDocument}
+                            onSelectDoc={handleSelectDoc}
+                            onDeleteDoc={handleDeleteDoc2}
+                            onDeleteWorkspace={requestDeleteWorkspace}
                             onRenameDoc={handleRenameDoc}
+                            onClose={handleCloseViewer}
                             dragHandle={dragHandle}
                           />
-                        </Suspense>
+                        ) : (
+                          <ErrorBoundary
+                            resetKey={activeDocId}
+                            fallback={<div className="pdf-loading-spinner"><span>This document couldn't be displayed.</span></div>}
+                          >
+                            <Suspense
+                              fallback={<div className="pdf-loading-spinner"><span>Loading viewer…</span></div>}
+                            >
+                              <DocViewer
+                                doc={activeDoc}
+                                onToggleBookmark={handleToggleBookmark}
+                                onDeleteDoc={handleDeleteDoc1}
+                                onDropFiles={handleDropFiles}
+                                onAddToNote={handleAddToNoteFromPdf}
+                                onRenameDoc={handleRenameDoc}
+                                onClose={handleCloseViewer}
+                                dragHandle={dragHandle}
+                              />
+                            </Suspense>
+                          </ErrorBoundary>
+                        )}
+                      </div>
+                    )}
+                  </PanelWrapper>
+                );
+              }
+              if (panelId === 'chat') {
+                return (
+                  <PanelWrapper
+                    key="chat"
+                    id="chat"
+                    style={panelFlexStyle}
+                    resizer={resizerNode}
+                  >
+                    {(dragHandle: React.ReactNode) => (
+                      <ErrorBoundary
+                        resetKey={activeDocId}
+                        fallback={<aside className="chat-panel" style={FULL_PANEL_STYLE}><div className="chat-empty">Chat unavailable.</div></aside>}
+                      >
+                        <ChatPanel
+                          activeDocId={activeDocId}
+                          activeDocTitle={activeDocName}
+                          resolveDocTitle={resolveDocTitle}
+                          style={FULL_PANEL_STYLE}
+                          dragHandle={dragHandle}
+                          onClose={handleCloseChat}
+                        />
                       </ErrorBoundary>
                     )}
-                  </div>
-                )}
-              </PanelWrapper>
-            );
-          }
-          if (panelId === 'chat') {
-            return (
-              <PanelWrapper key="chat" id="chat" style={{ flexShrink: 0 }} resizer={<Resizer id="resizer-chat" onMouseDown={handleResizerChatMouseDown} />} resizerPosition={resizerPosition}>
-                {(dragHandle: React.ReactNode) => (
-                  <ErrorBoundary
-                    resetKey={activeDocId}
-                    fallback={<aside className="chat-panel" style={chatStyle}><div className="chat-empty">Chat unavailable.</div></aside>}
+                  </PanelWrapper>
+                );
+              }
+              if (panelId === 'notes') {
+                return (
+                  <PanelWrapper
+                    key="notes"
+                    id="notes"
+                    style={panelFlexStyle}
+                    resizer={resizerNode}
                   >
-                    <ChatPanel
-                      activeDocId={activeDocId}
-                      activeDocTitle={activeDocName}
-                      resolveDocTitle={resolveDocTitle}
-                      style={chatStyle}
-                      dragHandle={dragHandle}
-                    />
-                  </ErrorBoundary>
-                )}
-              </PanelWrapper>
-            );
-          }
-          if (panelId === 'notes') {
-            return (
-              <PanelWrapper key="notes" id="notes" style={{ flexShrink: 0 }} resizer={<Resizer id="resizer2" onMouseDown={handleResizer2MouseDown} />} resizerPosition={resizerPosition}>
-                {(dragHandle: React.ReactNode) => (
-                  <ErrorBoundary
-                    resetKey={activeDocId}
-                    fallback={<aside className="notes" id="notesPanel" style={notesStyle}><div className="notes-placeholder"><h3>Notes</h3><p>Notes failed to load for this document.</p></div></aside>}
-                  >
-                    <NotesPanel
-                      doc={activeDoc}
-                      noteContent={noteContent}
-                      style={notesStyle}
-                      saveStatus={saveStatus}
-                      lastSavedTime={lastSavedTime}
-                      onNoteChange={handleNoteChange}
-                      onManualSave={handleManualSave}
-                      onTagChange={handleTagChange}
-                      dragHandle={dragHandle}
-                    />
-                  </ErrorBoundary>
-                )}
-              </PanelWrapper>
-            );
-          }
-          return null;
-        })}
-        </Reorder.Group>
+                    {(dragHandle: React.ReactNode) => (
+                      <ErrorBoundary
+                        resetKey={activeDocId}
+                        fallback={<aside className="notes" id="notesPanel" style={FULL_PANEL_STYLE}><div className="notes-placeholder"><h3>Notes</h3><p>Notes failed to load for this document.</p></div></aside>}
+                      >
+                        <NotesPanel
+                          doc={activeDoc}
+                          noteContent={noteContent}
+                          style={FULL_PANEL_STYLE}
+                          saveStatus={saveStatus}
+                          lastSavedTime={lastSavedTime}
+                          onNoteChange={handleNoteChange}
+                          onManualSave={handleManualSave}
+                          onTagChange={handleTagChange}
+                          onClose={handleCloseNotes}
+                          dragHandle={dragHandle}
+                        />
+                      </ErrorBoundary>
+                    )}
+                  </PanelWrapper>
+                );
+              }
+              return null;
+            })}
+          </Reorder.Group>
+        )}
+
+        <RightSidebar
+          collapsed={rightSidebarCollapsed}
+          onToggleCollapse={handleToggleRightSidebar}
+          isViewerOpen={isViewerOpen}
+          onToggleViewer={handleToggleViewer}
+          isChatOpen={isChatOpen}
+          onToggleChat={handleToggleChat}
+          isNotesOpen={isNotesOpen}
+          onToggleNotes={handleToggleNotes}
+        />
       </div>
 
       <input

@@ -1,7 +1,7 @@
 import React, { useMemo, useState } from 'react';
 import type { Workspace } from '../types';
 import { docMatchesQuery } from '../utils/search';
-import { IconDoc, IconTrash, IconPlus } from './Icons';
+import { IconDoc, IconTrash, IconPlus, IconChevronLeft, IconChevronRight } from './Icons';
 
 interface SidebarProps {
   workspaces: Workspace[];
@@ -103,7 +103,7 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
             onClick={onToggleSidebar}
             type="button"
           >
-            <span className="sidebar-collapse-indicator">{collapsed ? '»' : '«'}</span>
+            {collapsed ? <IconChevronRight size={13} /> : <IconChevronLeft size={13} />}
           </button>
           <span>Workspace</span>
         </div>

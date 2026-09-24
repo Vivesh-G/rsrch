@@ -20,6 +20,7 @@ interface NotesPanelProps {
   onNoteChange: (content: string) => void;
   onManualSave?: (content?: string) => void;
   onTagChange: (newTag: string) => void;
+  onClose?: () => void;
   dragHandle?: React.ReactNode;
 }
 
@@ -66,6 +67,7 @@ const NotesPanelInner: React.FC<NotesPanelProps> = ({
   onNoteChange,
   onManualSave,
   onTagChange,
+  onClose,
   dragHandle,
 }) => {
   const [wordCount, setWordCount] = useState<number>(0);
@@ -133,6 +135,17 @@ const NotesPanelInner: React.FC<NotesPanelProps> = ({
       style={style}
     >
       <div className="notes-placeholder">
+        {onClose && (
+          <button
+            className="icon-btn small panel-close-btn notes-placeholder-close"
+            id="closeInactiveNotesBtn"
+            title="Close Notes panel (move to right sidebar)"
+            onClick={onClose}
+            type="button"
+          >
+            <IconClose size={13} />
+          </button>
+        )}
         <div className="panel-empty-icon">
           <IconPencil size={36} />
         </div>
@@ -141,20 +154,20 @@ const NotesPanelInner: React.FC<NotesPanelProps> = ({
       </div>
 
       <div className="notes-content">
-        <div className="notes-head" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '12px' }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-            {dragHandle && <span className="drag-handle-wrapper">{dragHandle}</span>}
-            <div className="notes-meta">
-              <div className="crumbs">
-                <span>Notes</span>
-                <span className="crumb-sep">/</span>
-                <b id="crumbLabel" className="crumb-title" title={currentTitle} style={{ fontSize: '14px' }}>
+        <div className="notes-head" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '12px', minWidth: 0, gap: '8px' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', minWidth: 0, flex: 1, overflow: 'hidden' }}>
+            {dragHandle && <span className="drag-handle-wrapper" style={{ flexShrink: 0 }}>{dragHandle}</span>}
+            <div className="notes-meta" style={{ minWidth: 0, flex: 1, overflow: 'hidden' }}>
+              <div className="crumbs" style={{ minWidth: 0, overflow: 'hidden', whiteSpace: 'nowrap', textOverflow: 'ellipsis', display: 'flex', alignItems: 'center', gap: '4px' }}>
+                <span style={{ flexShrink: 0 }}>Notes</span>
+                <span className="crumb-sep" style={{ flexShrink: 0 }}>/</span>
+                <b id="crumbLabel" className="crumb-title" title={currentTitle} style={{ fontSize: '14px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', minWidth: 0, flex: 1 }}>
                   {currentTitle || '—'}
                 </b>
               </div>
             </div>
           </div>
-          <div className="notes-actions" style={{ display: 'flex', gap: '8px' }}>
+          <div className="notes-actions" style={{ display: 'flex', gap: '6px', flexShrink: 0, marginLeft: 'auto' }}>
             <button
               className={`icon-btn small save-btn ${saveStatus === 'saved' ? 'is-saved' : ''}`}
               id="saveBtn"
@@ -173,6 +186,17 @@ const NotesPanelInner: React.FC<NotesPanelProps> = ({
             >
               <IconDownload size={13} />
             </button>
+            {onClose && (
+              <button
+                className="icon-btn small panel-close-btn"
+                id="closeNotesBtn"
+                title="Close Notes panel (move to right sidebar)"
+                onClick={onClose}
+                type="button"
+              >
+                <IconClose size={13} />
+              </button>
+            )}
           </div>
         </div>
 
@@ -283,7 +307,9 @@ export const NotesPanel: React.FC<NotesPanelProps> = React.memo(
       prev.style === next.style &&
       prev.onNoteChange === next.onNoteChange &&
       prev.onManualSave === next.onManualSave &&
-      prev.onTagChange === next.onTagChange
+      prev.onTagChange === next.onTagChange &&
+      prev.onClose === next.onClose &&
+      prev.dragHandle === next.dragHandle
     );
   }
 );

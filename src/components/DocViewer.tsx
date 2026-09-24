@@ -48,6 +48,7 @@ interface DocViewerProps {
   onDropFiles: (files: FileList) => void;
   onAddToNote?: (quoteText: string, pageNumber: number) => void;
   onRenameDoc?: (docId: string, title: string) => void;
+  onClose?: () => void;
   dragHandle?: React.ReactNode;
 }
 
@@ -508,6 +509,7 @@ const LoadedViewer: React.FC<DocViewerProps> = ({
   onDropFiles,
   onAddToNote,
   onRenameDoc,
+  onClose,
   dragHandle,
 }) => {
   const docViewRef = useRef<HTMLDivElement>(null);
@@ -758,8 +760,8 @@ const LoadedViewer: React.FC<DocViewerProps> = ({
   return (
     <div id="docView" className="doc-view" ref={docViewRef}>
       <div className="viewer-toolbar">
-        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-          {dragHandle && <span className="drag-handle-wrapper">{dragHandle}</span>}
+        <div className="viewer-toolbar-left" style={{ display: 'flex', alignItems: 'center', gap: '6px', minWidth: 0, flexShrink: 1, overflow: 'hidden' }}>
+          {dragHandle && <span className="drag-handle-wrapper" style={{ flexShrink: 0 }}>{dragHandle}</span>}
           <div className="file-name" title={renaming ? `Source: ${doc.name}` : `Source: ${doc.name} (click to rename)`}>
             <IconDoc size={13} className="viewer-doc-icon" />
             {renaming ? (
@@ -770,54 +772,56 @@ const LoadedViewer: React.FC<DocViewerProps> = ({
                 onFocus={(e) => e.target.select()}
                 onChange={(e) => setRenameValue(e.target.value)}
                 onBlur={() => {
-                setRenaming(false);
-                if (renameValue.trim() && renameValue.trim() !== displayTitle) {
-                  onRenameDoc?.(doc.id, renameValue);
-                }
-              }}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
-                if (e.key === 'Escape') setRenaming(false);
-              }}
-              onClick={(e) => e.stopPropagation()}
-              maxLength={120}
-            />
-          ) : (
-            <span
-              id="currentFileName"
-              className="name-text"
-              style={onRenameDoc ? { cursor: 'text' } : undefined}
-              onClick={() => {
-                if (!onRenameDoc) return;
-                setRenameValue(displayTitle);
-                setRenaming(true);
-              }}
-            >
-              {displayTitle}
-            </span>
-          )}
+                  setRenaming(false);
+                  if (renameValue.trim() && renameValue.trim() !== displayTitle) {
+                    onRenameDoc?.(doc.id, renameValue);
+                  }
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
+                  if (e.key === 'Escape') setRenaming(false);
+                }}
+                onClick={(e) => e.stopPropagation()}
+                maxLength={120}
+              />
+            ) : (
+              <span
+                id="currentFileName"
+                className="name-text"
+                style={onRenameDoc ? { cursor: 'text' } : undefined}
+                onClick={() => {
+                  if (!onRenameDoc) return;
+                  setRenameValue(displayTitle);
+                  setRenaming(true);
+                }}
+              >
+                {displayTitle}
+              </span>
+            )}
           </div>
         </div>
 
-        <div className="page-ctrl">
-          <button className="icon-btn small" id="prevPage" onClick={prevPage} disabled={currentPage <= 1} title="Previous page" type="button">‹</button>
-          <span className="page-ind">
-            <b id="pageNum">{currentPage}</b>
-            <span className="page-sep">/</span>
-            <span id="pageTotal" className="muted">{totalPages}</span>
-          </span>
-          <button className="icon-btn small" id="nextPage" onClick={nextPage} disabled={currentPage >= totalPages} title="Next page" type="button">›</button>
+        <div className="viewer-toolbar-center" style={{ display: 'flex', alignItems: 'center', gap: '4px', flexShrink: 0 }}>
+          <div className="page-ctrl">
+            <button className="icon-btn small" id="prevPage" onClick={prevPage} disabled={currentPage <= 1} title="Previous page" type="button">‹</button>
+            <span className="page-ind">
+              <b id="pageNum">{currentPage}</b>
+              <span className="page-sep">/</span>
+              <span id="pageTotal" className="muted">{totalPages}</span>
+            </span>
+            <button className="icon-btn small" id="nextPage" onClick={nextPage} disabled={currentPage >= totalPages} title="Next page" type="button">›</button>
+          </div>
+
+          <div className="zoom-ctrl">
+            <button className="icon-btn small" id="zoomOut" onClick={() => zoomApi?.zoomOut()} title="Zoom out" type="button">−</button>
+            <span id="zoomLabel" onClick={() => zoomApi?.requestZoom(1 as any)} title="Click to reset zoom (100%)" style={{ cursor: 'pointer' }}>
+              {Math.round(zoom * 100)}%
+            </span>
+            <button className="icon-btn small" id="zoomIn" onClick={() => zoomApi?.zoomIn()} title="Zoom in" type="button">+</button>
+          </div>
         </div>
 
-        <div className="zoom-ctrl">
-          <button className="icon-btn small" id="zoomOut" onClick={() => zoomApi?.zoomOut()} title="Zoom out" type="button">−</button>
-          <span id="zoomLabel" onClick={() => zoomApi?.requestZoom(1 as any)} title="Click to reset zoom (100%)" style={{ cursor: 'pointer' }}>
-            {Math.round(zoom * 100)}%
-          </span>
-          <button className="icon-btn small" id="zoomIn" onClick={() => zoomApi?.zoomIn()} title="Zoom in" type="button">+</button>
-        </div>
-
-        <div className="tool-ctrl">
+        <div className="tool-ctrl" style={{ display: 'inline-flex', alignItems: 'center', gap: '2px', flexShrink: 0, marginLeft: 'auto' }}>
           <button className={`icon-btn small ${tintMode !== 'normal' ? 'tint-active' : ''}`} id="tintBtn" title={`Reading tint: ${tintMode} (click to cycle)`} onClick={cycleTintMode} type="button">
             <IconEye size={14} />
           </button>
@@ -833,6 +837,17 @@ const LoadedViewer: React.FC<DocViewerProps> = ({
           <button className="icon-btn small tool-delete" id="deleteDocBtn" title={`Delete "${displayTitle}"`} onClick={() => onDeleteDoc?.(doc.id)} type="button">
             <IconTrash size={13} />
           </button>
+          {onClose && (
+            <button
+              className="icon-btn small panel-close-btn"
+              id="closeViewerBtn"
+              title="Close PDF viewer (move to right sidebar)"
+              onClick={onClose}
+              type="button"
+            >
+              <IconClose size={13} />
+            </button>
+          )}
         </div>
       </div>
 
@@ -888,6 +903,19 @@ const InnerViewer: React.FC<DocViewerProps> = (props) => {
                     <IconDoc size={13} className="viewer-doc-icon" />
                     <span className="name-text">{displayTitle}</span>
                   </div>
+                  {props.onClose && (
+                    <div className="tool-ctrl">
+                      <button
+                        className="icon-btn small panel-close-btn"
+                        id="closeViewerLoadingBtn"
+                        title="Close PDF viewer (move to right sidebar)"
+                        onClick={props.onClose}
+                        type="button"
+                      >
+                        <IconClose size={13} />
+                      </button>
+                    </div>
+                  )}
                 </div>
                 <div className="viewer-body">
                   <div className="pdf-loading-spinner">
@@ -952,7 +980,8 @@ export const DocViewer: React.FC<DocViewerProps> = React.memo(
       prev.onDeleteDoc === next.onDeleteDoc &&
       prev.onDropFiles === next.onDropFiles &&
       prev.onAddToNote === next.onAddToNote &&
-      prev.onRenameDoc === next.onRenameDoc
+      prev.onRenameDoc === next.onRenameDoc &&
+      prev.onClose === next.onClose
     );
   }
 );

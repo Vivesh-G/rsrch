@@ -12,6 +12,7 @@ interface WorkspaceOverviewProps {
   onDeleteDoc?: (wsId: string, docId: string) => void;
   onDeleteWorkspace?: (wsId: string) => void;
   onRenameDoc?: (docId: string, title: string) => void;
+  onClose?: () => void;
   dragHandle?: React.ReactNode;
 }
 
@@ -26,6 +27,7 @@ const WorkspaceOverviewInner: React.FC<WorkspaceOverviewProps> = ({
   onDeleteDoc,
   onDeleteWorkspace,
   onRenameDoc,
+  onClose,
   dragHandle,
 }) => {
   const [renamingId, setRenamingId] = useState<string | null>(null);
@@ -56,17 +58,17 @@ const WorkspaceOverviewInner: React.FC<WorkspaceOverviewProps> = ({
 
   return (
     <div id="wsOverview" className="ws-overview">
-      <div className="ws-ov-head" style={{ position: 'relative' }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-          {dragHandle && <span className="drag-handle-wrapper">{dragHandle}</span>}
-          <div>
-            <h2 id="wsTitle">{workspace?.name || 'Workspace'}</h2>
-            <div className="muted" id="wsSub">
+      <div className="ws-ov-head" style={{ position: 'relative', display: 'flex', alignItems: 'center', justifyContent: 'space-between', minWidth: 0, gap: '8px' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '10px', minWidth: 0, flex: 1, overflow: 'hidden' }}>
+          {dragHandle && <span className="drag-handle-wrapper" style={{ flexShrink: 0 }}>{dragHandle}</span>}
+          <div style={{ minWidth: 0, overflow: 'hidden' }}>
+            <h2 id="wsTitle" style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', margin: 0 }}>{workspace?.name || 'Workspace'}</h2>
+            <div className="muted" id="wsSub" style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', fontSize: '11.5px' }}>
               {docCount} document{docCount !== 1 ? 's' : ''}
             </div>
           </div>
         </div>
-        <div className="ws-ov-actions">
+        <div className="ws-ov-actions" style={{ display: 'flex', alignItems: 'center', gap: '6px', flexShrink: 0, marginLeft: 'auto' }}>
           {workspace && (
             <button
               className="icon-btn small ws-ov-delete"
@@ -85,6 +87,17 @@ const WorkspaceOverviewInner: React.FC<WorkspaceOverviewProps> = ({
           >
             Add PDF
           </button>
+          {onClose && (
+            <button
+              className="icon-btn small panel-close-btn"
+              id="closeOverviewBtn"
+              title="Close PDF viewer (move to right sidebar)"
+              onClick={onClose}
+              type="button"
+            >
+              <IconClose size={13} />
+            </button>
+          )}
         </div>
       </div>
 
@@ -183,7 +196,8 @@ export const WorkspaceOverview = React.memo(
     return (
       prev.workspace === next.workspace &&
       prev.searchQuery === next.searchQuery &&
-      prev.notesCache === next.notesCache
+      prev.notesCache === next.notesCache &&
+      prev.onClose === next.onClose
     );
   }
 );

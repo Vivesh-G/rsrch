@@ -16,6 +16,7 @@ interface ChatPanelProps {
   resolveDocTitle: (id: string) => string | null;
   style?: React.CSSProperties;
   dragHandle?: React.ReactNode;
+  onClose?: () => void;
 }
 
 export const PERSISTED_CHAT_KEY = 'rschr-chat-id';
@@ -73,7 +74,7 @@ const MemoizedMessageList = React.memo(({ messages, isWaiting }: { messages: Cha
 // draft (it unmounts on close, so state resets naturally); past chats open
 // via the History view. Context = explicit attach chips, so a chat started
 // on one PDF keeps working when continued on another.
-const ChatPanelInner = ({ activeDocId, activeDocTitle, resolveDocTitle, style, dragHandle }: ChatPanelProps) => {
+const ChatPanelInner = ({ activeDocId, activeDocTitle, resolveDocTitle, style, dragHandle, onClose }: ChatPanelProps) => {
   const [view, setView] = useState<'chat' | 'history'>('chat');
   const [chats, setChats] = useState<ChatSession[]>([]);
   const [activeChatId, setActiveChatId] = useState<string | null>(null);
@@ -248,16 +249,29 @@ const ChatPanelInner = ({ activeDocId, activeDocTitle, resolveDocTitle, style, d
               <h3 title={headerTitle} style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{headerTitle}</h3>
             )}
           </div>
-          {view !== 'history' && (
-            <div className="chat-header-actions">
-              <button className="icon-btn small" title="View past chats" onClick={() => { setView('history'); setConfirmDeleteId(null); }} type="button">
-                <IconDoc size={13} />
+          <div className="chat-header-actions">
+            {view !== 'history' && (
+              <>
+                <button className="icon-btn small" title="View past chats" onClick={() => { setView('history'); setConfirmDeleteId(null); }} type="button">
+                  <IconDoc size={13} />
+                </button>
+                <button className="icon-btn small" title="Start a new blank chat" onClick={startBlank} type="button">
+                  <IconPlus size={12} />
+                </button>
+              </>
+            )}
+            {onClose && (
+              <button
+                className="icon-btn small panel-close-btn"
+                id="closeChatBtn"
+                title="Close Chat panel (move to right sidebar)"
+                onClick={onClose}
+                type="button"
+              >
+                <IconClose size={13} />
               </button>
-              <button className="icon-btn small" title="Start a new blank chat" onClick={startBlank} type="button">
-                <IconPlus size={12} />
-              </button>
-            </div>
-          )}
+            )}
+          </div>
         </div>
 
         {view === 'history' ? (
@@ -341,7 +355,9 @@ export const ChatPanel = React.memo(
       prev.activeDocId === next.activeDocId &&
       prev.activeDocTitle === next.activeDocTitle &&
       prev.resolveDocTitle === next.resolveDocTitle &&
-      prev.style === next.style
+      prev.style === next.style &&
+      prev.onClose === next.onClose &&
+      prev.dragHandle === next.dragHandle
     );
   }
 );
