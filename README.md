@@ -11,10 +11,12 @@ MVP Screenshot:
 
 ## Features
 
-- **Workspaces & Documents**: Group PDFs into workspaces, tag them, bookmark favorites, and filter across documents and note contents instantly.
-- **Embedded PDF Viewer**: WebAssembly-based PDF reader with fast page navigation, text selection tools (copy, highlight, append to note), and page-link jumping (`[p. N]`).
+- **Workspaces & Documents**: Group PDFs and LaTeX projects into workspaces, tag them, bookmark favorites, and filter across documents and note contents instantly.
+- **Live LaTeX Authoring & Compilation**: Built-in CodeMirror 6 LaTeX editor with live inline math previews, autocomplete slash commands, and a headless Tectonic backend engine compiling PDFs in real time.
+- **Interactive SyncTeX (Forward & Inverse Sync)**: Seamlessly jump from the compiled PDF preview directly to the corresponding LaTeX source block, or click a line in the editor to instantly scroll the PDF to the matching spatial location.
+- **Embedded PDF Viewer**: WebAssembly-based PDF reader with fast page navigation, text selection tools, highlighting, and dynamic context menus.
 - **Live Markdown Notes**: ContentEditable note editor with slash commands (`/h1`, `/todo`, `/code`, etc.), auto-saving to local storage and SQLite, and `.md` file export.
-- **Document-Aware AI Chat**: Ask questions against attached PDFs using Google Gemini with sliding-window rate limiting and session history.
+- **Document-Aware AI Chat**: Ask questions against attached PDFs or generate LaTeX code using Google Gemini with sliding-window rate limiting, session history, and one-click "Replace Selection".
 - **Dark & Light Modes**: Clean UI with persistent theme toggle and resizable panels.
 
 ---
@@ -22,7 +24,7 @@ MVP Screenshot:
 ## Tech Stack
 
 - **Frontend**: React 19, TypeScript, Vite, EmbedPDF (`pdfium.wasm`)
-- **Backend**: FastAPI, Uvicorn, Python 3.11+, aiosqlite (SQLite with WAL mode)
+- **Backend**: FastAPI, Uvicorn, Python 3.11+, aiosqlite (SQLite with WAL mode), Tectonic LaTeX Engine
 - **PDF Processing**: PyMuPDF (`fitz`) for text extraction
 - **AI Integration**: Google GenAI SDK
 
@@ -140,9 +142,10 @@ rsrch/
 │   │   ├── TopBar.tsx        # Search, theme toggle, and chat panel button
 │   │   ├── Sidebar.tsx       # Workspace tree and document navigation
 │   │   ├── WorkspaceOverview.tsx # Document grid view when no document is active
-│   │   ├── DocViewer.tsx     # EmbedPDF viewer with cache and highlight logic
-│   │   ├── NotesPanel.tsx    # Note metadata, word count, and export actions
+│   │   ├── DocViewer.tsx     # EmbedPDF viewer with cache, highlights, and SyncTeX
+│   │   ├── NotesPanel.tsx    # Switches between markdown notes and CodeMirror LaTeX editor
 │   │   ├── LiveMarkdownEditor.tsx # ContentEditable markdown engine and slash menu
+│   │   ├── CodeMirrorLatexEditor.tsx # CodeMirror 6 LaTeX engine with SyncTeX and KaTeX
 │   │   ├── ChatPanel.tsx     # Gemini chat interface with context attachments
 │   │   ├── ErrorBoundary.tsx # Isolated component crash boundaries
 │   │   └── Resizer.tsx       # Drag resizers for split layout
@@ -169,8 +172,11 @@ rsrch/
 | `PUT` | `/api/workspaces/{id}` | Rename or update expanded state of a workspace |
 | `DELETE` | `/api/workspaces/{id}` | Delete a workspace and its files |
 | `POST` | `/api/workspaces/{ws}/documents/upload` | Upload a PDF document and extract text |
+| `POST` | `/api/workspaces/{ws}/documents/latex` | Create a new LaTeX document |
 | `GET` | `/api/documents/{id}` | Get document metadata |
-| `GET` | `/api/documents/{id}/file` | Stream PDF file bytes |
+| `GET` | `/api/documents/{id}/file` | Stream PDF file bytes or compiled LaTeX PDF |
+| `POST` | `/api/documents/{id}/compile` | Trigger LaTeX compilation |
+| `GET` | `/api/documents/{id}/synctex` | Fetch SyncTeX layout mappings |
 | `PUT` | `/api/documents/{id}` | Update document title, tag, or bookmark status |
 | `DELETE` | `/api/documents/{id}` | Delete a document and its stored PDF |
 | `GET` | `/api/documents/{id}/note` | Get the markdown note for a document |

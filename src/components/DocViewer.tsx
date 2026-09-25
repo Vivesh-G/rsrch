@@ -28,6 +28,7 @@ import {
   IconHighlighter,
   IconCopy,
   IconClose,
+  IconExternalLink,
 } from './Icons';
 
 // Legacy types kept for export compatibility (pre-EmbedPDF % rects are no
@@ -511,9 +512,10 @@ const HighlightRestorer: React.FC<{ docId: string }> = ({ docId }) => {
 const SelectionMenu: React.FC<{
   menuWrapperProps: any;
   documentId: string;
+  isLatex: boolean;
   onAddToNote?: (quoteText: string, pageNumber: number) => void;
   onToast: (msg: string) => void;
-}> = ({ menuWrapperProps, documentId, onAddToNote, onToast }) => {
+}> = ({ menuWrapperProps, documentId, isLatex, onAddToNote, onToast }) => {
   const { provides: selection } = useSelectionCapability();
   const { provides: annotationCapability } = useAnnotationCapability();
   let annotationApi: any = null;
@@ -558,6 +560,46 @@ const SelectionMenu: React.FC<{
     });
     selection?.forDocument(documentId)?.clear();
   });
+
+  const handleGoToBlock = () => {
+    try {
+      const domSelection = window.getSelection();
+      if (domSelection && domSelection.rangeCount > 0) {
+        const range = domSelection.getRangeAt(0);
+        const rect = range.getBoundingClientRect();
+        
+        let container: Node | null = range.startContainer;
+        if (container.nodeType === Node.TEXT_NODE) {
+          container = container.parentElement;
+        }
+        const pageEl = (container as Element)?.closest('[data-testid^="core__page-layer-"]') as HTMLElement;
+        
+        if (pageEl) {
+          const match = pageEl.getAttribute('data-testid')?.match(/core__page-layer-(\d+)/);
+          if (match) {
+            const pageIndex = parseInt(match[1], 10);
+            const pageRect = pageEl.getBoundingClientRect();
+            const x = rect.left - pageRect.left;
+            const y = rect.top - pageRect.top;
+            
+            const pdfWidth = 595.28;
+            const pdfHeight = 841.89;
+            const pdfX = (x / pageRect.width) * pdfWidth;
+            const pdfY = (y / pageRect.height) * pdfHeight;
+            
+            window.dispatchEvent(
+              new CustomEvent('rsrch:inverse-sync', {
+                detail: { docId: documentId, page: pageIndex + 1, x: pdfX, y: pdfY }
+              })
+            );
+            selection?.forDocument(documentId)?.clear();
+          }
+        }
+      }
+    } catch (err) {
+      console.warn('handleGoToBlock failed:', err);
+    }
+  };
 
   const handleHighlight = () => {
     try {
@@ -618,10 +660,17 @@ const SelectionMenu: React.FC<{
       {/* Wrapper is the selection box (top-left anchored) — left:50% pairs
           with the CSS translate(-50%,-100%) to center the menu above it. */}
       <div className="pdf-selection-popup" style={{ position: 'absolute', left: '50%', pointerEvents: 'auto' }}>
-        <button className="pdf-popup-btn primary" onClick={handleAdd} title="Insert selected quote into notes with page reference" type="button">
-          <IconPencil size={12} />
-          <span>Add to note</span>
-        </button>
+        {isLatex ? (
+          <button className="pdf-popup-btn primary" onClick={handleGoToBlock} title="Go to source block in editor" type="button">
+            <IconExternalLink size={12} />
+            <span>Go to Block</span>
+          </button>
+        ) : (
+          <button className="pdf-popup-btn primary" onClick={handleAdd} title="Insert selected quote into notes with page reference" type="button">
+            <IconPencil size={12} />
+            <span>Add to note</span>
+          </button>
+        )}
         <button className="pdf-popup-btn" onClick={handleHighlight} title="Highlight selected text on document" type="button">
           <IconHighlighter size={12} />
           <span>Highlight</span>
@@ -867,8 +916,51 @@ const LoadedViewer: React.FC<DocViewerProps> = ({
         setTimeout(() => el.classList.remove('pdf-page-focus-pulse'), 1800);
       }
     };
+    
+    const rectHandler = (e: Event) => {
+      const detail = (e as CustomEvent).detail;
+      if (!detail || !detail.page || detail.page < 1) return;
+      try {
+        scrollApi?.scrollToPage({ pageNumber: detail.page, behavior: 'smooth' });
+      } catch {}
+      
+      setTimeout(() => {
+        // EmbedPDF pages are usually available by index.
+        const pageEl = document.querySelector(`[data-testid="core__page-layer-${detail.page - 1}"]`) as HTMLElement;
+        if (pageEl) {
+          const hl = document.createElement('div');
+          hl.className = 'synctex-highlight-pulse';
+          hl.style.position = 'absolute';
+          // SyncTeX coordinates are in TeX points (1/72.27 inch). 
+          // We can approximate by converting to percentages based on A4 size, 
+          // but if we use the unscaled PDF points, EmbedPDF applies a scale transform!
+          // We'll use percentages assuming ~595x842 as fallback, but use the pageEl's dimensions to scale if it's already scaled.
+          // Since it's a quick pulse, a CSS animation on the Y offset will do.
+          const pdfWidth = 595.28;
+          const pdfHeight = 841.89;
+          
+          hl.style.left = `${(detail.x / pdfWidth) * 100}%`;
+          hl.style.bottom = `${(1 - (detail.y / pdfHeight)) * 100}%`;
+          hl.style.width = `${(detail.width / pdfWidth) * 100}%`;
+          hl.style.height = `${(detail.height / pdfHeight) * 100}%`;
+          hl.style.backgroundColor = 'rgba(255, 200, 0, 0.4)';
+          hl.style.zIndex = '999';
+          hl.style.pointerEvents = 'none';
+          hl.style.borderRadius = '4px';
+          hl.style.animation = 'pulse-fade 1.5s ease-out forwards';
+          
+          pageEl.appendChild(hl);
+          setTimeout(() => hl.remove(), 1600);
+        }
+      }, 100);
+    };
+
     window.addEventListener('rsrch:scroll-to-page', handler);
-    return () => window.removeEventListener('rsrch:scroll-to-page', handler);
+    window.addEventListener('rsrch:scroll-to-rect', rectHandler);
+    return () => {
+      window.removeEventListener('rsrch:scroll-to-page', handler);
+      window.removeEventListener('rsrch:scroll-to-rect', rectHandler);
+    };
   }, [scrollApi]);
 
   if (!doc) return null;
@@ -957,7 +1049,7 @@ const LoadedViewer: React.FC<DocViewerProps> = ({
               documentId={doc.id}
               pageIndex={pageIndex}
               selectionMenu={(props: any) => (
-                <SelectionMenu {...props} documentId={doc.id} onAddToNote={onAddToNote} onToast={showToast} />
+                <SelectionMenu {...props} documentId={doc.id} isLatex={doc.doc_type === 'latex'} onAddToNote={onAddToNote} onToast={showToast} />
               )}
             />
             <AnnotationLayer documentId={doc.id} pageIndex={pageIndex} />
@@ -1071,6 +1163,25 @@ const LoadedViewer: React.FC<DocViewerProps> = ({
         onDragOver={(e) => { if (!hasFileDrag(e)) return; e.preventDefault(); setIsDraggingOver(true); }}
         onDragLeave={(e) => { e.preventDefault(); setIsDraggingOver(false); }}
         onDrop={(e) => { e.preventDefault(); setIsDraggingOver(false); if (e.dataTransfer.files?.length) onDropFiles(e.dataTransfer.files); }}
+        onDoubleClick={(e) => {
+          const pageEl = (e.target as HTMLElement).closest('[data-testid^="core__page-layer-"]') as HTMLElement;
+          if (!pageEl) return;
+          const match = pageEl.getAttribute('data-testid')?.match(/core__page-layer-(\d+)/);
+          if (!match) return;
+          const pageIndex = parseInt(match[1], 10);
+          const rect = pageEl.getBoundingClientRect();
+          const x = e.clientX - rect.left;
+          const y = e.clientY - rect.top;
+          const pdfWidth = 595.28;
+          const pdfHeight = 841.89;
+          const pdfX = (x / rect.width) * pdfWidth;
+          const pdfY = (y / rect.height) * pdfHeight;
+          window.dispatchEvent(
+            new CustomEvent('rsrch:inverse-sync', {
+              detail: { docId: doc.id, page: pageIndex + 1, x: pdfX, y: pdfY }
+            })
+          );
+        }}
       >
         <HighlightRestorer docId={doc.id} />
         <Viewport documentId={doc.id} style={{ flex: 1, minHeight: 0, width: '100%', height: '100%', background: 'transparent' }}>

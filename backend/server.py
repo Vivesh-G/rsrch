@@ -404,6 +404,33 @@ async def get_doc(doc_id: str):
     return doc
 
 
+@app.get("/api/documents/{doc_id}/synctex")
+async def get_doc_synctex(doc_id: str):
+    doc = await get_document(doc_id)
+    if not doc or doc.get("doc_type") != "latex":
+        raise HTTPException(status_code=404, detail="Document not found or not LaTeX")
+
+    note = await get_note(doc_id)
+    source_content = note.get("content", "")
+    build_key = get_build_key(source_content, f"{doc_id}.tex")
+    synctex_path = str(settings.latex_builds_dir / build_key / f"{doc_id}.synctex.gz")
+    
+    if not await asyncio.to_thread(os.path.exists, synctex_path):
+        # Fallback to the latest successful build
+        pattern = str(settings.latex_builds_dir / "*" / f"{doc_id}.synctex.gz")
+        st_files = await asyncio.to_thread(glob.glob, pattern)
+        if st_files:
+            synctex_path = await asyncio.to_thread(max, st_files, key=os.path.getmtime)
+        else:
+            raise HTTPException(status_code=404, detail="SyncTeX not found")
+            
+    return FileResponse(
+        path=synctex_path,
+        media_type="text/plain",
+        filename=f"{doc_id}.synctex",
+        headers={"Content-Encoding": "gzip", "Cache-Control": "no-store"}
+    )
+
 @app.get("/api/documents/{doc_id}/file")
 async def get_doc_file(doc_id: str):
     doc = await get_document(doc_id)

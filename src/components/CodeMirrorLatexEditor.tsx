@@ -19,6 +19,7 @@ import { lintGutter, setDiagnostics, linter } from '@codemirror/lint';
 import { katexPlugin } from './katexDecoration';
 import { LATEX_SLASH_COMMANDS, type LatexSlashCommand } from './latexAutocomplete';
 import { api } from '../services/api';
+import { fetchAndParseSynctex, syncTexLineToRect, syncTexRectToLine } from '../utils/synctex';
 
 const selectionTooltip = StateField.define<Tooltip | null>({
   create: getCursorTooltip,
@@ -113,6 +114,8 @@ export const CodeMirrorLatexEditor: React.FC<CodeMirrorLatexEditorProps> = ({
   const debounceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastWordCountRef = useRef<number>(-1);
   const docIdRef = useRef(docId);
+  const workspaceIdRef = useRef(workspaceId);
+  workspaceIdRef.current = workspaceId;
   const contentRef = useRef(content);
   contentRef.current = content;
   const onChangeRef = useRef(onChange);
@@ -184,6 +187,31 @@ export const CodeMirrorLatexEditor: React.FC<CodeMirrorLatexEditorProps> = ({
     window.addEventListener('rsrch:bibtex-updated', fetchBib);
     return () => window.removeEventListener('rsrch:bibtex-updated', fetchBib);
   }, [workspaceId]);
+
+  useEffect(() => {
+    const handleInverseSync = (e: Event) => {
+      const currentDocId = docIdRef.current;
+      const detail = (e as CustomEvent).detail;
+      if (!detail || detail.docId !== currentDocId) return;
+      fetchAndParseSynctex(currentDocId).then((data) => {
+        if (!data) return;
+        const block = syncTexRectToLine(data, detail.page, detail.x, detail.y);
+        if (block && block.line) {
+          const view = viewRef.current;
+          if (view) {
+            const line = view.state.doc.line(Math.min(block.line, view.state.doc.lines));
+            view.dispatch({
+              selection: { anchor: line.from },
+              scrollIntoView: true,
+            });
+            view.focus();
+          }
+        }
+      });
+    };
+    window.addEventListener('rsrch:inverse-sync', handleInverseSync);
+    return () => window.removeEventListener('rsrch:inverse-sync', handleInverseSync);
+  }, [docId]);
 
   const bibEntriesRef = useRef(bibEntries);
   bibEntriesRef.current = bibEntries;
@@ -390,6 +418,37 @@ export const CodeMirrorLatexEditor: React.FC<CodeMirrorLatexEditorProps> = ({
       doc: content,
       extensions: [
         EditorView.domEventHandlers({
+          click: (e, view) => {
+            if (e.ctrlKey || e.metaKey) {
+              const pos = view.posAtCoords({ x: e.clientX, y: e.clientY });
+              if (pos !== null) {
+                const line = view.state.doc.lineAt(pos).number;
+                e.preventDefault();
+                const currentDocId = docIdRef.current;
+                // Forward sync: parse synctex and scroll PDF
+                fetchAndParseSynctex(currentDocId).then((data) => {
+                  if (!data) return;
+                  const rect = syncTexLineToRect(data, line);
+                  if (rect) {
+                    window.dispatchEvent(
+                      new CustomEvent('rsrch:scroll-to-rect', {
+                        detail: {
+                          docId: currentDocId,
+                          page: rect.page,
+                          x: rect.left,
+                          y: rect.bottom,
+                          width: rect.width || 5, // Fallback width if missing
+                          height: rect.height || 10,
+                        },
+                      })
+                    );
+                  } else {
+                    console.warn('No SyncTeX block found for this line. (Preamble or non-typeset line?)');
+                  }
+                });
+              }
+            }
+          },
           drop: (e, view) => {
             if (e.dataTransfer && e.dataTransfer.files.length > 0) {
               const file = e.dataTransfer.files[0];
@@ -400,7 +459,7 @@ export const CodeMirrorLatexEditor: React.FC<CodeMirrorLatexEditorProps> = ({
                   // Upload to backend
                   const formData = new FormData();
                   formData.append('files', file);
-                  fetch(`${api.baseUrl}/workspaces/${workspaceId}/assets`, {
+                  fetch(`${api.baseUrl}/workspaces/${workspaceIdRef.current}/assets`, {
                     method: 'POST',
                     body: formData,
                   }).catch(err => console.error("Drop upload failed", err));

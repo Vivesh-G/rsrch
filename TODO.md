@@ -79,13 +79,13 @@ By deeply intertwining **PDF Document Workspaces** with a **Real-Time Reactive L
 ---
 
 ### Phase 3: Interactive SyncTeX Engine *(Spatial Navigation)*
-- [ ] **SyncTeX Artifact Preservation:**
-  - [ ] Keep `.synctex.gz` during Tectonic compilation for active documents.
-  - [ ] Expose an endpoint `/api/documents/{doc_id}/synctex` to query coordinates or parse the synctex map.
-- [ ] **Forward Sync (Editor $\rightarrow$ PDF Viewer):**
-  - [ ] `Ctrl + Click` or `Cmd + Click` on any line in `CodeMirrorLatexEditor` scrolls EmbedPDF to the exact page and paragraph bounding box.
-- [ ] **Inverse Sync (PDF Viewer $\rightarrow$ Editor):**
-  - [ ] Double-clicking any text block or formula in EmbedPDF jumps the CodeMirror editor cursor directly to the corresponding source line and column.
+- [x] **SyncTeX Artifact Preservation:**
+  - [x] Keep `.synctex.gz` during Tectonic compilation for active documents.
+  - [x] Expose an endpoint `/api/documents/{doc_id}/synctex` to query coordinates or parse the synctex map.
+- [x] **Forward Sync (Editor $\rightarrow$ PDF Viewer):**
+  - [x] `Ctrl + Click` or `Cmd + Click` on any line in `CodeMirrorLatexEditor` scrolls EmbedPDF to the exact page and paragraph bounding box.
+- [x] **Inverse Sync (PDF Viewer $\rightarrow$ Editor):**
+  - [x] Double-clicking any text block or formula in EmbedPDF jumps the CodeMirror editor cursor directly to the corresponding source line and column.
 
 ---
 

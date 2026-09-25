@@ -141,22 +141,6 @@ def prune_all_builds() -> dict:
             s = _prune_builds(keep_doc_id=doc_id)
             stats["deleted_dirs"] += s["deleted_dirs"]
             stats["freed_bytes"] += s["freed_bytes"]
-        # Strip orphan synctex from pre-cap builds (nothing serves it).
-        try:
-            for st in root.glob("*.synctex.gz"):
-                try:
-                    stats["freed_bytes"] += st.stat().st_size
-                    st.unlink()
-                except OSError:
-                    pass
-            for st in root.glob("*/**.synctex.gz"):
-                try:
-                    stats["freed_bytes"] += st.stat().st_size
-                    st.unlink()
-                except OSError:
-                    pass
-        except Exception:
-            pass
         s = _prune_builds()
         stats["deleted_dirs"] += s["deleted_dirs"]
         stats["freed_bytes"] += s["freed_bytes"]
@@ -240,7 +224,7 @@ async def run_compile(doc_id: str, source_content: str, workspace_id: str | None
             )
             
         process = await asyncio.create_subprocess_exec(
-            tectonic_bin, "--outdir", str(temp_dir), "--keep-logs", entrypoint,
+            tectonic_bin, "--outdir", str(temp_dir), "--keep-logs", "--synctex", entrypoint,
             cwd=str(temp_dir),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE
@@ -278,10 +262,12 @@ async def run_compile(doc_id: str, source_content: str, workspace_id: str | None
                 shutil.copy(temp_pdf, pdf_path)
             if temp_log.exists():
                 shutil.copy(temp_log, log_path)
+            temp_synctex = temp_dir / Path(entrypoint).with_suffix(".synctex.gz").name
+            if temp_synctex.exists():
+                shutil.copy(temp_synctex, builds_dir / Path(entrypoint).with_suffix(".synctex.gz").name)
+            
             # Evict stale snapshots (bounded cache). Runs after the copy so
             # the just-built dir is always retained; never fails the build.
-            # NOTE: synctex deliberately not stored — no endpoint or viewer
-            # code consumes .synctex.gz, it only bloated every snapshot.
             _touch(builds_dir)
             _prune_builds(keep_doc_id=doc_id, keep_key=build_key)
             _prune_temp_orphans()
