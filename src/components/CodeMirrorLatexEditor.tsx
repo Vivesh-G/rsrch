@@ -14,10 +14,11 @@ import type { Tooltip } from '@codemirror/view';
 import { defaultKeymap, history, historyKeymap } from '@codemirror/commands';
 import { StreamLanguage } from '@codemirror/language';
 import { stex } from '@codemirror/legacy-modes/mode/stex';
-import { snippet, nextSnippetField, prevSnippetField, clearSnippet } from '@codemirror/autocomplete';
+import { snippet, nextSnippetField, prevSnippetField, clearSnippet, autocompletion, CompletionContext } from '@codemirror/autocomplete';
 import { lintGutter, setDiagnostics, linter } from '@codemirror/lint';
 import { katexPlugin } from './katexDecoration';
 import { LATEX_SLASH_COMMANDS, type LatexSlashCommand } from './latexAutocomplete';
+import { api } from '../services/api';
 
 const selectionTooltip = StateField.define<Tooltip | null>({
   create: getCursorTooltip,
@@ -92,6 +93,7 @@ function getCursorTooltip(state: EditorState): Tooltip | null {
 
 interface CodeMirrorLatexEditorProps {
   docId: string;
+  workspaceId: string;
   content: string;
   onChange: (content: string) => void;
   onManualSave?: (content: string) => void;
@@ -100,6 +102,7 @@ interface CodeMirrorLatexEditorProps {
 
 export const CodeMirrorLatexEditor: React.FC<CodeMirrorLatexEditorProps> = ({
   docId,
+  workspaceId,
   content,
   onChange,
   onManualSave,
@@ -139,6 +142,52 @@ export const CodeMirrorLatexEditor: React.FC<CodeMirrorLatexEditorProps> = ({
     selectedIndex: 0,
   });
 
+  const [bibEntries, setBibEntries] = useState<{key: string, title: string, author: string, year: string}[]>([]);
+  
+  useEffect(() => {
+    if (!workspaceId) return;
+    const fetchBib = async () => {
+      try {
+        const res = await fetch(`${api.baseUrl}/workspaces/${workspaceId}/bibtex`);
+        if (res.ok) {
+          const data = await res.json();
+          const content = data.content || '';
+          
+          const entries = [];
+          const regex = /@\w+\s*{\s*([^,]+),/g;
+          let match;
+          while ((match = regex.exec(content)) !== null) {
+            const key = match[1].trim();
+            const nextAt = content.indexOf('@', match.index + 1);
+            const entryContent = nextAt === -1 ? content.slice(match.index) : content.slice(match.index, nextAt);
+            
+            // Allow matching curly braces or quotes, handles newlines
+            const titleMatch = entryContent.match(/title\s*=\s*[{"]([^}"]*)[}"]/i);
+            const authorMatch = entryContent.match(/author\s*=\s*[{"]([^}"]*)[}"]/i);
+            const yearMatch = entryContent.match(/year\s*=\s*[{"]?(\d+)[}"]?/i);
+            
+            entries.push({
+              key,
+              title: titleMatch ? titleMatch[1].replace(/\s+/g, ' ') : 'Unknown Title',
+              author: authorMatch ? authorMatch[1].replace(/\s+/g, ' ') : 'Unknown Author',
+              year: yearMatch ? yearMatch[1] : '',
+            });
+          }
+          setBibEntries(entries);
+        }
+      } catch (e) {
+        console.error('Failed to parse bibtex for autocomplete', e);
+      }
+    };
+    fetchBib();
+    
+    window.addEventListener('rsrch:bibtex-updated', fetchBib);
+    return () => window.removeEventListener('rsrch:bibtex-updated', fetchBib);
+  }, [workspaceId]);
+
+  const bibEntriesRef = useRef(bibEntries);
+  bibEntriesRef.current = bibEntries;
+  
   const slashMenuRef = useRef(slashMenu);
   slashMenuRef.current = slashMenu;
 
@@ -340,6 +389,54 @@ export const CodeMirrorLatexEditor: React.FC<CodeMirrorLatexEditorProps> = ({
     const state = EditorState.create({
       doc: content,
       extensions: [
+        EditorView.domEventHandlers({
+          drop: (e, view) => {
+            if (e.dataTransfer && e.dataTransfer.files.length > 0) {
+              const file = e.dataTransfer.files[0];
+              if (file.type.startsWith('image/') || file.name.endsWith('.pdf')) {
+                e.preventDefault();
+                const pos = view.posAtCoords({ x: e.clientX, y: e.clientY });
+                if (pos !== null) {
+                  // Upload to backend
+                  const formData = new FormData();
+                  formData.append('files', file);
+                  fetch(`${api.baseUrl}/workspaces/${workspaceId}/assets`, {
+                    method: 'POST',
+                    body: formData,
+                  }).catch(err => console.error("Drop upload failed", err));
+
+                  // Insert template
+                  const template = `\\begin{figure}[htbp]\n  \\centering\n  \\includegraphics[width=\\linewidth]{figures/${file.name}}\n  \\caption{${file.name}}\n\\end{figure}\n`;
+                  view.dispatch({ changes: { from: pos, insert: template } });
+                  return true;
+                }
+              }
+            }
+            return false;
+          }
+        }),
+        autocompletion({
+          override: [
+            (context: CompletionContext) => {
+              const word = context.matchBefore(/\\cite[a-z]*\{[^}]*/);
+              if (!word) return null;
+              if (word.from === word.to && !context.explicit) return null;
+              
+              const options = bibEntriesRef.current.map(entry => ({
+                label: entry.key,
+                type: 'text',
+                detail: entry.year ? `(${entry.year})` : '',
+                info: `${entry.title}\n${entry.author}`,
+              }));
+              
+              return {
+                from: word.from + word.text.lastIndexOf('{') + 1,
+                options,
+                validFor: /^[\w.-]*$/
+              };
+            }
+          ]
+        }),
         lineNumbers(),
         highlightActiveLineGutter(),
         highlightActiveLine(),

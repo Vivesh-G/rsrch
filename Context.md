@@ -292,3 +292,14 @@ Browser native `::selection` overlay rendered concurrently with CodeMirror's `.c
 - **Ask AI Selection Popup Refinement:**
   - Eliminated double container nesting/padding bug where `.pdf-selection-popup` was wrapped inside CodeMirror's `.cm-tooltip`.
   - Implemented dedicated `.latex-ask-ai-popup` and `.latex-ask-ai-btn` with sparkle SVG icon, 24px height, uniform 3px padding, and 6px vertical offset.
+- **Phase 1: Workspace Assets & Images:**
+  - Integrated `AssetsPanel.tsx` in the right sidebar for drag-and-drop workspace asset management.
+  - Added backend endpoints `GET`/`POST /api/workspaces/{ws_id}/assets` (with `.sty`, `.cls`, `.bst` root routing and standard image `figures/` handling) to `server.py`.
+  - Updated `compiler.py` to seamlessly copy the `assets/` directory into the isolated build sandbox so Tectonic resolves relative paths correctly.
+  - Implemented CodeMirror drag-and-drop event interception to auto-upload and insert `\includegraphics{}` macros for images and PDFs.
+- **Phase 2: Academic Citation & Bibliography System:**
+  - Implemented `BibtexPanel.tsx` as a dedicated right sidebar tab for managing `references.bib` with debounced auto-saving.
+  - Backed by `GET`/`PUT /api/workspaces/{ws_id}/bibtex` endpoints storing directly to the workspace `assets/` directory (picked up by Tectonic automatically).
+  - Wrote a custom regex parser for `.bib` contents and integrated it via `@codemirror/autocomplete` into `CodeMirrorLatexEditor.tsx`, presenting a smart inline dropdown for `\cite{...}` commands containing paper title, author, and year.
+  - Bridged `BibtexPanel` and `CodeMirrorLatexEditor` with a custom window event (`rsrch:bibtex-updated`) for instant autocomplete dictionary refetching without full page reloads.
+  - Standardized UI paddings, header breadcrumbs, and layout flex properties across `NotesPanel`, `AssetsPanel`, and `BibtexPanel`. Added a custom `IconRef` for the bibliography sidebar tab.

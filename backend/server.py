@@ -9,10 +9,11 @@ from typing import List, Optional, Dict, Deque, cast
 from contextlib import asynccontextmanager
 import logging
 
-from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Query
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
 
 from database import (
     init_db,
@@ -307,9 +308,92 @@ async def create_latex_document(
     )
     
     note = await get_note(doc_id)
-    await run_compile(doc_id, note.get("content", ""))
+    await run_compile(doc_id, note.get("content", ""), workspace_id=ws_id)
     
     return doc
+
+@app.get("/api/workspaces/{ws_id}/assets")
+async def list_workspace_assets(ws_id: str):
+    ws = await get_workspace(ws_id)
+    if not ws:
+        raise HTTPException(status_code=404, detail="Workspace not found")
+        
+    assets_dir = settings.data_dir / "workspaces" / ws_id / "assets"
+    if not assets_dir.exists():
+        return {"assets": []}
+        
+    assets = []
+    # Using glob to find all files recursively
+    for filepath in assets_dir.rglob("*"):
+        if filepath.is_file():
+            # Get relative path for frontend
+            rel_path = filepath.relative_to(assets_dir).as_posix()
+            assets.append({"path": rel_path})
+            
+    return {"assets": assets}
+
+@app.post("/api/workspaces/{ws_id}/assets")
+async def upload_workspace_assets(ws_id: str, files: List[UploadFile] = File(...), path: str = Form("figures")):
+    ws = await get_workspace(ws_id)
+    if not ws:
+        raise HTTPException(status_code=404, detail="Workspace not found")
+        
+    # Prevent directory traversal
+    clean_path = path.strip().strip("/")
+    if ".." in clean_path:
+        raise HTTPException(status_code=400, detail="Invalid path")
+        
+    target_dir = settings.data_dir / "workspaces" / ws_id / "assets" / clean_path
+    target_dir.mkdir(parents=True, exist_ok=True)
+    
+    import aiofiles
+    uploaded = []
+    for file in files:
+        if not file.filename:
+            continue
+            
+        file_target_dir = target_dir
+        if file.filename.lower().endswith(('.sty', '.cls', '.bst')):
+            file_target_dir = settings.data_dir / "workspaces" / ws_id / "assets"
+            
+        file_target_dir.mkdir(parents=True, exist_ok=True)
+        save_path = file_target_dir / file.filename
+        
+        async with aiofiles.open(str(save_path), "wb") as out:
+            while True:
+                chunk = await file.read(1024 * 1024)
+                if not chunk:
+                    break
+                await out.write(chunk)
+        
+        rel_path = save_path.relative_to(settings.data_dir / "workspaces" / ws_id / "assets").as_posix()
+        uploaded.append({"path": rel_path, "filename": file.filename})
+        
+    return {"status": "success", "uploaded": uploaded}
+
+class BibtexUpdate(BaseModel):
+    content: str
+
+@app.get("/api/workspaces/{ws_id}/bibtex")
+async def get_bibtex(ws_id: str):
+    ws = await get_workspace(ws_id)
+    if not ws:
+        raise HTTPException(status_code=404, detail="Workspace not found")
+    bib_path = settings.data_dir / "workspaces" / ws_id / "assets" / "references.bib"
+    if bib_path.exists():
+        return {"content": bib_path.read_text(encoding="utf-8", errors="replace")}
+    return {"content": ""}
+
+@app.put("/api/workspaces/{ws_id}/bibtex")
+async def save_bibtex(ws_id: str, data: BibtexUpdate):
+    ws = await get_workspace(ws_id)
+    if not ws:
+        raise HTTPException(status_code=404, detail="Workspace not found")
+    assets_dir = settings.data_dir / "workspaces" / ws_id / "assets"
+    assets_dir.mkdir(parents=True, exist_ok=True)
+    bib_path = assets_dir / "references.bib"
+    bib_path.write_text(data.content, encoding="utf-8")
+    return {"status": "success"}
 
 
 @app.get("/api/documents/{doc_id}", response_model=DocumentResponse)
@@ -334,7 +418,7 @@ async def get_doc_file(doc_id: str):
         # Filesystem probes run off the event loop (was: blocking
         # os.path.exists / glob.glob inline in the async handler).
         if not await asyncio.to_thread(os.path.exists, pdf_path):
-            result = await run_compile(doc_id, source_content)
+            result = await run_compile(doc_id, source_content, workspace_id=doc["workspace_id"])
             if result.status != "success":
                 # Fallback to the latest successful build
                 pattern = str(settings.latex_builds_dir / "*" / f"{doc_id}.pdf")
@@ -377,7 +461,7 @@ async def compile_document(doc_id: str):
     note = await get_note(doc_id)
     source_content = note.get("content", "")
     
-    result = await run_compile(doc_id, source_content)
+    result = await run_compile(doc_id, source_content, workspace_id=doc["workspace_id"])
     return result.model_dump()
 
 

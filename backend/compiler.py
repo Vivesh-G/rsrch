@@ -164,7 +164,7 @@ def prune_all_builds() -> dict:
         pass
     return stats
 
-async def run_compile(doc_id: str, source_content: str) -> BuildResult:
+async def run_compile(doc_id: str, source_content: str, workspace_id: str | None = None) -> BuildResult:
     start_time = time.monotonic()
 
     entrypoint = f"{doc_id}.tex"
@@ -222,6 +222,12 @@ async def run_compile(doc_id: str, source_content: str) -> BuildResult:
         
         # Write source file
         (temp_dir / entrypoint).write_text(source_content, encoding="utf-8")
+        
+        # Copy workspace assets if any
+        if workspace_id:
+            assets_dir = base_data_dir / "workspaces" / workspace_id / "assets"
+            if assets_dir.exists():
+                shutil.copytree(assets_dir, temp_dir, dirs_exist_ok=True)
         
         tectonic_bin = shutil.which("tectonic")
         if not tectonic_bin:

@@ -168,7 +168,7 @@ const NotesPanelInner: React.FC<NotesPanelProps> = ({
             {dragHandle && <span className="drag-handle-wrapper" style={{ flexShrink: 0 }}>{dragHandle}</span>}
             <div className="notes-meta" style={{ minWidth: 0, flex: 1, overflow: 'hidden' }}>
               <div className="crumbs" style={{ minWidth: 0, overflow: 'hidden', whiteSpace: 'nowrap', textOverflow: 'ellipsis', display: 'flex', alignItems: 'center', gap: '4px' }}>
-                <span style={{ flexShrink: 0 }}>Notes</span>
+                <span style={{ flexShrink: 0 }}>{doc?.doc_type === 'latex' ? 'LaTeX' : 'Notes'}</span>
                 <span className="crumb-sep" style={{ flexShrink: 0 }}>/</span>
                 <b id="crumbLabel" className="crumb-title" title={currentTitle} style={{ fontSize: '14px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', minWidth: 0, flex: 1 }}>
                   {currentTitle || '—'}
@@ -295,6 +295,7 @@ const NotesPanelInner: React.FC<NotesPanelProps> = ({
         {doc && doc.doc_type === 'latex' ? (
           <CodeMirrorLatexEditor
             docId={doc.id}
+            workspaceId={doc.workspace_id}
             content={noteContent}
             onChange={onNoteChange}
             onManualSave={onManualSave}

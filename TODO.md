@@ -54,25 +54,25 @@ By deeply intertwining **PDF Document Workspaces** with a **Real-Time Reactive L
 ## 2. Engineering Roadmap & Implementation Milestones
 
 ### Phase 1: Multi-File Project Hierarchy & Asset Pipeline *(Foundation)*
-- [ ] **Multi-File LaTeX Projects:**
-  - [ ] Support subfiles via `\input{sections/...}` and `\include{...}`.
-  - [ ] File tree management in sidebar for LaTeX projects (folders for `sections/`, `figures/`, `tables/`).
-- [ ] **Asset & Figure Management:**
-  - [ ] Project-level `figures/` directory to store images (`.png`, `.jpg`, `.pdf`, `.svg`).
-  - [ ] Auto-resolve relative paths in `\includegraphics[...]{figures/...}` inside `compiler.py`.
-  - [ ] Drag-and-drop image upload directly into the editor pane with auto-insertion of `\begin{figure}` templates.
-- [ ] **Custom Conference Style/Class Ingestion:**
-  - [ ] Allow uploading and compiling alongside custom `.sty`, `.cls`, and `.bst` files (e.g. `neurips_2026.sty`, `acmart.cls`, `IEEEtran.cls`).
+- [x] **Multi-File LaTeX Projects:**
+  - [x] Support subfiles via `\input{sections/...}` and `\include{...}`.
+  - [x] File tree management in sidebar for LaTeX projects (folders for `sections/`, `figures/`, `tables/`).
+- [x] **Asset & Figure Management:**
+  - [x] Project-level `figures/` directory to store images (`.png`, `.jpg`, `.pdf`, `.svg`).
+  - [x] Auto-resolve relative paths in `\includegraphics[...]{figures/...}` inside `compiler.py`.
+  - [x] Drag-and-drop image upload directly into the editor pane with auto-insertion of `\begin{figure}` templates.
+- [x] **Custom Conference Style/Class Ingestion:**
+  - [x] Allow uploading and compiling alongside custom `.sty`, `.cls`, and `.bst` files (e.g. `neurips_2026.sty`, `acmart.cls`, `IEEEtran.cls`).
 
 ---
 
 ### Phase 2: Academic Citation & Bibliography System *(Ergonomics)*
-- [ ] **Workspace `references.bib` File:**
-  - [ ] Dedicated BibTeX editor / viewer tab within the workspace.
-  - [ ] Tectonic pipeline configured to run BibTeX / Biber automatically and generate `.bbl` files.
-- [ ] **Smart `\cite{...}` Autocomplete in CodeMirror:**
-  - [ ] Parse `.bib` keys, titles, authors, and years in the background.
-  - [ ] Autocomplete dropdown in CodeMirror showing full bibliographic details when typing `\cite{...}` or `\citep{...}`.
+- [x] **Workspace `references.bib` File:**
+  - [x] Dedicated BibTeX editor / viewer tab within the workspace.
+  - [x] Tectonic pipeline configured to run BibTeX / Biber automatically and generate `.bbl` files.
+- [x] **Smart `\cite{...}` Autocomplete in CodeMirror:**
+  - [x] Parse `.bib` keys, titles, authors, and years in the background.
+  - [x] Autocomplete dropdown in CodeMirror showing full bibliographic details when typing `\cite{...}` or `\citep{...}`.
 - [ ] **PDF-to-BibTeX Auto-Harvester:**
   - [ ] Extract DOI / arXiv ID from uploaded PDFs and automatically query Semantic Scholar / CrossRef / arXiv APIs to generate clean, standardized BibTeX entries.
 

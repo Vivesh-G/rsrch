@@ -6,6 +6,8 @@ import { Sidebar } from './components/Sidebar';
 import { Resizer } from './components/Resizer';
 import { WorkspaceOverview } from './components/WorkspaceOverview';
 import { NotesPanel } from './components/NotesPanel';
+import { AssetsPanel } from './components/AssetsPanel';
+import { BibtexPanel } from './components/BibtexPanel';
 import { ChatPanel, PERSISTED_CHAT_KEY } from './components/ChatPanel';
 import { ConfirmModal, NewWorkspaceModal } from './components/Modals';
 import { ErrorBoundary } from './components/ErrorBoundary';
@@ -146,9 +148,11 @@ export const App: React.FC = () => {
   const [isViewerOpen, setIsViewerOpen] = usePersistentState<boolean>('rschr-viewer-open', true);
   const [isChatOpen, setIsChatOpen] = usePersistentState<boolean>('rschr-chat-open', false);
   const [isNotesOpen, setIsNotesOpen] = usePersistentState<boolean>('rschr-notes-open', true);
+  const [isAssetsOpen, setIsAssetsOpen] = usePersistentState<boolean>('rschr-assets-open', false);
+  const [isBibtexOpen, setIsBibtexOpen] = usePersistentState<boolean>('rschr-bibtex-open', false);
   const [rightSidebarCollapsed, setRightSidebarCollapsed] = usePersistentState<boolean>('rschr-right-sidecol', false);
-  const PANEL_IDS = useMemo(() => ['viewer', 'chat', 'notes'] as string[], []);
-  const [panelOrderRaw, setPanelOrder] = usePersistentState<string[]>('rschr-panel-order', ['viewer', 'chat', 'notes']);
+  const PANEL_IDS = useMemo(() => ['viewer', 'chat', 'notes', 'assets', 'bibtex'] as string[], []);
+  const [panelOrderRaw, setPanelOrder] = usePersistentState<string[]>('rschr-panel-order', ['viewer', 'chat', 'notes', 'assets', 'bibtex']);
   // Sanitize persisted order: drop unknowns/'sidebar', dedupe, append missing
   // so corrupt localStorage can never render an empty or partial layout.
   const panelOrder = useMemo(() => {
@@ -170,15 +174,17 @@ export const App: React.FC = () => {
         if (p === 'viewer') return isViewerOpen;
         if (p === 'chat') return isChatOpen;
         if (p === 'notes') return isNotesOpen;
+        if (p === 'assets') return isAssetsOpen;
+        if (p === 'bibtex') return isBibtexOpen;
         return false;
       }),
-    [panelOrder, isViewerOpen, isChatOpen, isNotesOpen]
+    [panelOrder, isViewerOpen, isChatOpen, isNotesOpen, isAssetsOpen, isBibtexOpen]
   );
   // Merge a visible-only reorder back into the full order, preserving the
   // previous index of hidden panels so reopening lands where it was.
   const handleReorder = useCallback((nextVisible: string[]) => {
     setPanelOrder((prev) => {
-      const valid = ['viewer', 'chat', 'notes'];
+      const valid = ['viewer', 'chat', 'notes', 'assets', 'bibtex'];
       const seen = new Set<string>();
       const base = (Array.isArray(prev) ? prev : []).filter((p) => {
         if (!valid.includes(p) || seen.has(p)) return false;
@@ -200,7 +206,7 @@ export const App: React.FC = () => {
   const handleMovePanel = useCallback(
     (id: string, dir: -1 | 1) => {
       setPanelOrder((prev) => {
-        const base = Array.isArray(prev) ? [...prev] : ['viewer', 'chat', 'notes'];
+        const base = Array.isArray(prev) ? [...prev] : ['viewer', 'chat', 'notes', 'assets', 'bibtex'];
         const i = base.indexOf(id);
         const j = i + dir;
         if (i < 0 || j < 0 || j >= base.length) return base;
@@ -1014,6 +1020,20 @@ export const App: React.FC = () => {
   const handleCloseNotes = useCallback(() => {
     setIsNotesOpen(false);
   }, [setIsNotesOpen]);
+  
+  const handleToggleAssets = useCallback(() => {
+    setIsAssetsOpen((v) => !v);
+  }, [setIsAssetsOpen]);
+  const handleCloseAssets = useCallback(() => {
+    setIsAssetsOpen(false);
+  }, [setIsAssetsOpen]);
+  
+  const handleToggleBibtex = useCallback(() => {
+    setIsBibtexOpen((v) => !v);
+  }, [setIsBibtexOpen]);
+  const handleCloseBibtex = useCallback(() => {
+    setIsBibtexOpen(false);
+  }, [setIsBibtexOpen]);
 
   const handleToggleRightSidebar = useCallback(() => {
     setRightSidebarCollapsed((v) => !v);
@@ -1247,6 +1267,56 @@ export const App: React.FC = () => {
                   </PanelWrapper>
                 );
               }
+              if (panelId === 'assets') {
+                return (
+                  <PanelWrapper
+                    key="assets"
+                    id="assets"
+                    style={panelFlexStyle}
+                    resizer={resizerNode}
+                    onMove={handleMovePanel}
+                  >
+                    {(dragHandle: React.ReactNode) => (
+                      <ErrorBoundary
+                        resetKey={activeWsId}
+                        fallback={<aside className="notes" id="assetsPanel" style={FULL_PANEL_STYLE}><div className="notes-placeholder"><h3>Assets</h3><p>Assets failed to load.</p></div></aside>}
+                      >
+                        <AssetsPanel
+                          workspace={activeWorkspace}
+                          style={FULL_PANEL_STYLE}
+                          onClose={handleCloseAssets}
+                          dragHandle={dragHandle}
+                        />
+                      </ErrorBoundary>
+                    )}
+                  </PanelWrapper>
+                );
+              }
+              if (panelId === 'bibtex') {
+                return (
+                  <PanelWrapper
+                    key="bibtex"
+                    id="bibtex"
+                    style={panelFlexStyle}
+                    resizer={resizerNode}
+                    onMove={handleMovePanel}
+                  >
+                    {(dragHandle: React.ReactNode) => (
+                      <ErrorBoundary
+                        resetKey={activeWsId}
+                        fallback={<aside className="notes" id="bibtexPanel" style={FULL_PANEL_STYLE}><div className="notes-placeholder"><h3>BibTeX</h3><p>BibTeX failed to load.</p></div></aside>}
+                      >
+                        <BibtexPanel
+                          workspace={activeWorkspace}
+                          style={FULL_PANEL_STYLE}
+                          onClose={handleCloseBibtex}
+                          dragHandle={dragHandle}
+                        />
+                      </ErrorBoundary>
+                    )}
+                  </PanelWrapper>
+                );
+              }
               return null;
             })}
           </Reorder.Group>
@@ -1261,6 +1331,10 @@ export const App: React.FC = () => {
           onToggleChat={handleToggleChat}
           isNotesOpen={isNotesOpen}
           onToggleNotes={handleToggleNotes}
+          isAssetsOpen={isAssetsOpen}
+          onToggleAssets={handleToggleAssets}
+          isBibtexOpen={isBibtexOpen}
+          onToggleBibtex={handleToggleBibtex}
         />
       </div>
 

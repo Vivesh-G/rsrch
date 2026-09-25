@@ -1,5 +1,5 @@
 import React from 'react';
-import { IconDoc, IconChat, IconPencil, IconChevronLeft, IconChevronRight } from './Icons';
+import { IconDoc, IconChat, IconPencil, IconChevronLeft, IconChevronRight, IconRef } from './Icons';
 
 interface RightSidebarProps {
   collapsed: boolean;
@@ -10,6 +10,10 @@ interface RightSidebarProps {
   onToggleChat: () => void;
   isNotesOpen: boolean;
   onToggleNotes: () => void;
+  isAssetsOpen: boolean;
+  onToggleAssets: () => void;
+  isBibtexOpen: boolean;
+  onToggleBibtex: () => void;
   style?: React.CSSProperties;
 }
 
@@ -22,6 +26,10 @@ export const RightSidebar: React.FC<RightSidebarProps> = React.memo(({
   onToggleChat,
   isNotesOpen,
   onToggleNotes,
+  isAssetsOpen,
+  onToggleAssets,
+  isBibtexOpen,
+  onToggleBibtex,
   style,
 }) => {
   return (
@@ -94,6 +102,39 @@ export const RightSidebar: React.FC<RightSidebarProps> = React.memo(({
           <span className="right-sidebar-tooltip" aria-hidden="true">
             Notes
             <small>{isNotesOpen ? 'Open' : 'Collapsed'}</small>
+          </span>
+        </button>
+        <button
+          className={`right-sidebar-btn ${isAssetsOpen ? 'active' : 'docked'}`}
+          id="sidebarBtnAssets"
+          title={`Assets (${isAssetsOpen ? 'Open — click to close' : 'Collapsed — click to open'})`}
+          onClick={onToggleAssets}
+          type="button"
+          aria-pressed={isAssetsOpen}
+          aria-label="Toggle Assets panel"
+        >
+          {isAssetsOpen && <span className="right-sidebar-active-bar" />}
+          <IconDoc size={17} />
+          <span className="right-sidebar-tooltip" aria-hidden="true">
+            Assets
+            <small>{isAssetsOpen ? 'Open' : 'Collapsed'}</small>
+          </span>
+        </button>
+
+        <button
+          className={`right-sidebar-btn ${isBibtexOpen ? 'active' : 'docked'}`}
+          id="sidebarBtnBibtex"
+          title={`BibTeX (${isBibtexOpen ? 'Open — click to close' : 'Collapsed — click to open'})`}
+          onClick={onToggleBibtex}
+          type="button"
+          aria-pressed={isBibtexOpen}
+          aria-label="Toggle BibTeX panel"
+        >
+          {isBibtexOpen && <span className="right-sidebar-active-bar" />}
+          <IconRef size={17} />
+          <span className="right-sidebar-tooltip" aria-hidden="true">
+            BibTeX
+            <small>{isBibtexOpen ? 'Open' : 'Collapsed'}</small>
           </span>
         </button>
       </div>

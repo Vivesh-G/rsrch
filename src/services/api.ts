@@ -58,6 +58,8 @@ const json = (body: unknown): RequestInit => ({
 const enc = (s: string) => encodeURIComponent(s);
 
 export const api = {
+  baseUrl: API_BASE,
+  
   async getWorkspaces(): Promise<Workspace[]> {
     try {
       return await req<Workspace[]>('/workspaces');
