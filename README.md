@@ -192,3 +192,7 @@ rsrch/
 
 ## Contribution
 Feel free to test the app and contribute to it!
+
+---
+
+Copyright © 2026 Vivesh G. All rights reserved.

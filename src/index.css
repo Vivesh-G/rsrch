@@ -46,6 +46,7 @@
   --brand-hover: #222222;
   --brand-active: #000000;
   --accent: var(--brand);
+  --accent-alpha: rgba(40, 115, 225, 0.22);
   --primary-dark: #0B0B0B;
 
   /* Subdued Semantic States */
@@ -127,6 +128,7 @@ body.dark, [data-theme="dark"] {
   --brand-hover: #3A3A3A;
   --brand-active: #1A1A1A;
   --accent: var(--brand);
+  --accent-alpha: rgba(65, 120, 205, 0.42);
   --primary-dark: #F5F5F5;
 
   --success: #87A88F;
@@ -187,8 +189,14 @@ body {
 
 /* Selection */
 ::selection {
-  background: var(--surface-muted);
-  color: var(--text-primary);
+  background: rgba(56, 139, 253, 0.22);
+  color: inherit;
+}
+
+body.dark ::selection,
+[data-theme="dark"] ::selection {
+  background: rgba(56, 139, 253, 0.32);
+  color: inherit;
 }
 
 /* APP SHELL */
@@ -2310,6 +2318,12 @@ body.dark .pdf-highlight-mark {
   background: var(--surface-subtle);
 }
 
+.slash-menu-head span {
+  color: var(--warning, #B3A16F);
+  font-weight: 600;
+  letter-spacing: 0.06em;
+}
+
 .slash-menu-head kbd {
   font-family: var(--font-mono);
   font-size: 9.5px;
@@ -2318,6 +2332,8 @@ body.dark .pdf-highlight-mark {
   background: var(--surface);
   border: 1px solid var(--border);
   color: var(--text-tertiary);
+  cursor: pointer;
+  user-select: none;
 }
 
 .slash-menu-list {
@@ -2328,6 +2344,17 @@ body.dark .pdf-highlight-mark {
   gap: 1px;
   flex: 1;
   max-height: 270px;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
+}
+
+.slash-menu-list::-webkit-scrollbar {
+  width: 6px;
+}
+
+.slash-menu-list::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 3px;
 }
 
 .slash-item {
@@ -2348,6 +2375,21 @@ body.dark .pdf-highlight-mark {
 .slash-item:hover,
 .slash-item.active {
   background: var(--surface-subtle);
+}
+
+.slash-item-badge {
+  width: 28px;
+  min-width: 28px;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--text-primary);
+  flex-shrink: 0;
+  text-align: center;
 }
 
 .slash-item-icon {
@@ -2408,6 +2450,130 @@ body.dark .pdf-highlight-mark {
   text-align: center;
   color: var(--text-tertiary);
   font-size: 12px;
+}
+
+/* CODEMIRROR LATEX EDITOR CURSOR & ACTIVE LINE */
+.cm-content {
+  caret-color: var(--text-primary) !important;
+}
+
+.cm-cursor,
+.cm-cursor-primary,
+.cm-dropCursor {
+  border-left: 2px solid var(--text-primary) !important;
+}
+
+body.dark .cm-cursor,
+body.dark .cm-cursor-primary,
+body.dark .cm-dropCursor,
+[data-theme="dark"] .cm-cursor,
+[data-theme="dark"] .cm-cursor-primary,
+[data-theme="dark"] .cm-dropCursor {
+  border-left-color: #F5F5F5 !important;
+}
+
+body.dark .cm-content,
+[data-theme="dark"] .cm-content {
+  caret-color: #F5F5F5 !important;
+}
+
+.cm-activeLine {
+  background-color: rgba(0, 0, 0, 0.035) !important;
+}
+
+body.dark .cm-activeLine,
+[data-theme="dark"] .cm-activeLine {
+  background-color: rgba(255, 255, 255, 0.045) !important;
+}
+
+.cm-activeLineGutter {
+  background-color: var(--surface-subtle) !important;
+  color: var(--text-primary) !important;
+  font-weight: 600 !important;
+}
+
+/* CodeMirror Selection Highlighting */
+.cm-selectionBackground,
+.cm-focused .cm-selectionBackground,
+.cm-selectionLayer .cm-selectionBackground {
+  background: rgba(56, 139, 253, 0.22) !important;
+  border-radius: 2px;
+}
+
+body.dark .cm-selectionBackground,
+body.dark .cm-focused .cm-selectionBackground,
+body.dark .cm-selectionLayer .cm-selectionBackground,
+[data-theme="dark"] .cm-selectionBackground,
+[data-theme="dark"] .cm-focused .cm-selectionBackground,
+[data-theme="dark"] .cm-selectionLayer .cm-selectionBackground {
+  background: rgba(56, 139, 253, 0.32) !important;
+}
+
+/* Ensure native selection is transparent in CodeMirror to prevent double-draw / jagged variations */
+.cm-editor ::selection,
+.cm-editor .cm-content ::selection,
+.cm-editor .cm-line ::selection,
+.cm-editor .cm-line::selection,
+body.dark .cm-editor ::selection,
+body.dark .cm-editor .cm-content ::selection,
+body.dark .cm-editor .cm-line ::selection,
+body.dark .cm-editor .cm-line::selection,
+[data-theme="dark"] .cm-editor ::selection,
+[data-theme="dark"] .cm-editor .cm-content ::selection,
+[data-theme="dark"] .cm-editor .cm-line ::selection,
+[data-theme="dark"] .cm-editor .cm-line::selection {
+  background: transparent !important;
+  background-color: transparent !important;
+}
+
+/* LATEX EDITOR ASK AI SELECTION POPUP */
+.cm-tooltip.cm-selection-tooltip-wrapper {
+  background: transparent !important;
+  border: none !important;
+  box-shadow: none !important;
+  padding: 0 !important;
+  overflow: visible !important;
+  margin-bottom: 6px !important;
+  z-index: 100 !important;
+}
+
+.latex-ask-ai-popup {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-full);
+  box-shadow: var(--shadow-md);
+  user-select: none;
+  animation: popupScaleIn var(--duration-fast) var(--ease-standard);
+}
+
+.latex-ask-ai-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 0 10px;
+  height: 24px;
+  border-radius: var(--radius-full);
+  border: 1px solid transparent;
+  background: var(--brand);
+  color: var(--text-inverse);
+  font-family: var(--font-sans);
+  font-size: 11.5px;
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+  line-height: 1;
+  transition: opacity var(--duration-fast) ease, background-color var(--duration-fast) ease;
+}
+
+.latex-ask-ai-btn:hover {
+  opacity: 0.88;
+}
+
+.latex-ask-ai-btn svg {
+  flex-shrink: 0;
 }
 
 /* TAG PICKER POPOVER */

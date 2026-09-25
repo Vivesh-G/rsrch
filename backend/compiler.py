@@ -7,12 +7,11 @@ from pydantic import BaseModel
 from diagnostics import parse_diagnostics, Diagnostic
 import time
 
-# Bound the on-disk build cache. Every unique source snapshot used to mint a
-# permanent latex_builds/<sha256>/ dir (pdf+log+synctex) with no eviction, so
-# the autosave→compile loop grew the folder without bound.
-MAX_BUILDS_PER_DOC = int(os.getenv("LATEX_MAX_BUILDS_PER_DOC", "3"))
-MAX_TOTAL_BUILDS = int(os.getenv("LATEX_MAX_TOTAL_BUILDS", "100"))
-MAX_TOTAL_BYTES = int(os.getenv("LATEX_MAX_TOTAL_MB", "500")) * 1024 * 1024
+from config import settings
+
+MAX_BUILDS_PER_DOC = settings.latex_max_builds_per_doc
+MAX_TOTAL_BUILDS = settings.latex_max_total_builds
+MAX_TOTAL_BYTES = settings.latex_max_total_bytes
 
 class BuildResult(BaseModel):
     build_id: str

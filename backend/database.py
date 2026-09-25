@@ -5,12 +5,15 @@ from typing import List, Optional, Dict, Any
 from contextlib import asynccontextmanager
 import aiosqlite
 
-DB_DIR = os.path.join(os.path.dirname(__file__), "data")
-DB_PATH = os.path.join(DB_DIR, "rschr.db")
-PDF_DIR = os.path.join(DB_DIR, "pdfs")
+from config import settings
 
-os.makedirs(DB_DIR, exist_ok=True)
-os.makedirs(PDF_DIR, exist_ok=True)
+# Paths come from config.settings (single load, exe-friendly via
+# RSRCH_DATA_DIR). Kept as module-level str aliases for backward compat.
+DB_DIR = str(settings.data_dir)
+DB_PATH = str(settings.db_path)
+PDF_DIR = str(settings.pdf_dir)
+
+settings.ensure_dirs()
 
 STARTER_NOTE_TEMPLATE = """## Getting started
 
@@ -131,24 +134,35 @@ async def get_workspace(ws_id: str) -> Optional[Dict[str, Any]]:
         return None
 
 
+def _doc_row_to_doc(row) -> Dict[str, Any]:
+    doc = dict(row)
+    doc["bookmarked"] = bool(doc["bookmarked"])
+    doc["has_file"] = bool(doc.get("file_path"))
+    return doc
+
+
 async def get_all_workspaces() -> List[Dict[str, Any]]:
     async with get_db() as db:
         cursor = await db.execute("SELECT * FROM workspaces ORDER BY created_at ASC")
         workspaces = [dict(row) for row in await cursor.fetchall()]
+        ws_ids = [ws["id"] for ws in workspaces]
+        docs_by_ws: Dict[str, list] = {ws_id: [] for ws_id in ws_ids}
+        if ws_ids:
+            # Single query for all docs (was: one query per workspace).
+            placeholders = ",".join("?" for _ in ws_ids)
+            doc_cursor = await db.execute(
+                f"SELECT * FROM documents WHERE workspace_id IN ({placeholders}) ORDER BY added_at ASC",
+                ws_ids,
+            )
+            for d in await doc_cursor.fetchall():
+                doc = _doc_row_to_doc(d)
+                docs_by_ws.setdefault(doc["workspace_id"], []).append(doc)
+        result = []
         for ws in workspaces:
             ws["expanded"] = bool(ws["expanded"])
-            doc_cursor = await db.execute(
-                "SELECT * FROM documents WHERE workspace_id = ? ORDER BY added_at ASC",
-                (ws["id"],),
-            )
-            docs = []
-            for d in await doc_cursor.fetchall():
-                doc_dict = dict(d)
-                doc_dict["bookmarked"] = bool(doc_dict["bookmarked"])
-                doc_dict["has_file"] = bool(doc_dict.get("file_path"))
-                docs.append(doc_dict)
-            ws["docs"] = docs
-        return workspaces
+            ws["docs"] = docs_by_ws.get(ws["id"], [])
+            result.append(ws)
+        return result
 
 
 async def create_workspace(ws_id: str, name: str) -> Dict[str, Any]:
@@ -257,12 +271,7 @@ async def get_document(doc_id: str) -> Optional[Dict[str, Any]]:
     async with get_db() as db:
         cursor = await db.execute("SELECT * FROM documents WHERE id = ?", (doc_id,))
         row = await cursor.fetchone()
-        if row:
-            doc = dict(row)
-            doc["bookmarked"] = bool(doc["bookmarked"])
-            doc["has_file"] = bool(doc.get("file_path"))
-            return doc
-        return None
+        return _doc_row_to_doc(row) if row else None
 
 
 async def update_document(
@@ -283,12 +292,15 @@ async def update_document(
         if bookmarked is not None:
             updates.append("bookmarked = ?")
             params.append(1 if bookmarked else 0)
-        if not updates:
-            return await get_document(doc_id)
-        params.append(doc_id)
-        await db.execute(f"UPDATE documents SET {', '.join(updates)} WHERE id = ?", params)
-        await db.commit()
-    return await get_document(doc_id)
+        if updates:
+            params.append(doc_id)
+            await db.execute(f"UPDATE documents SET {', '.join(updates)} WHERE id = ?", params)
+            await db.commit()
+        # Single connection: re-read on the same handle (was: get_document
+        # opened a second connection while the first was still checked out).
+        cursor = await db.execute("SELECT * FROM documents WHERE id = ?", (doc_id,))
+        row = await cursor.fetchone()
+        return _doc_row_to_doc(row) if row else None
 
 
 async def delete_document(doc_id: str) -> bool:
@@ -312,8 +324,13 @@ async def get_note(doc_id: str) -> Dict[str, Any]:
         row = await cursor.fetchone()
         if row:
             return dict(row)
-        doc = await get_document(doc_id)
-        title = doc["note_title"] if doc else "document"
+        # Same connection for the title lookup (was: get_document() opened
+        # a nested second connection to the same SQLite file).
+        doc_cursor = await db.execute(
+            "SELECT note_title FROM documents WHERE id = ?", (doc_id,)
+        )
+        doc_row = await doc_cursor.fetchone()
+        title = doc_row["note_title"] if doc_row and doc_row["note_title"] else "document"
         content = STARTER_NOTE_TEMPLATE.replace("this document", title)
         now = time.time()
         await db.execute(
@@ -515,12 +532,21 @@ async def delete_chat(chat_id: str) -> bool:
 
 
 async def get_chat_messages(chat_id: str, limit: int = 200) -> List[Dict[str, Any]]:
+    """Most recent `limit` messages, returned oldest-first (chronological).
+
+    Previous version used ORDER BY created_at ASC LIMIT N, which returned
+    the OLDEST N — long chats lost all recent context. DESC + reverse
+    keeps the tail, which is what both the history view and the LLM need.
+    """
+    limit = max(1, min(limit, 500))
     async with get_db() as db:
         cursor = await db.execute(
-            "SELECT * FROM chat_messages WHERE chat_id = ? ORDER BY created_at ASC LIMIT ?",
+            "SELECT * FROM chat_messages WHERE chat_id = ? ORDER BY created_at DESC, id DESC LIMIT ?",
             (chat_id, limit),
         )
-        return [dict(r) for r in await cursor.fetchall()]
+        rows = [dict(r) for r in await cursor.fetchall()]
+        rows.reverse()
+        return rows
 
 
 async def add_chat_message(
@@ -533,8 +559,10 @@ async def add_chat_message(
             (chat_id, document_id, role, content, now),
         )
         row = await cursor.fetchone()
+        if row is None:
+            raise RuntimeError("Failed to persist chat message")
         await db.execute(
             "UPDATE chats SET updated_at = ? WHERE id = ?", (now, chat_id)
         )
         await db.commit()
-        return dict(row) if row else {}
+        return dict(row)
