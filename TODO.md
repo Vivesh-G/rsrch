@@ -118,10 +118,10 @@ By deeply intertwining **PDF Document Workspaces** with a **Real-Time Reactive L
 ---
 
 ### Phase 6: Lightweight Distribution & Cross-Platform Launchers
-- [ ] **One-Click Launchers:**
-  - [ ] `run.bat` for Windows (venv bootstrap + browser auto-launch).
-  - [ ] `run.sh` for macOS / Linux (venv bootstrap + browser auto-launch).
-  - [ ] Support fast path via `uv` if present on host.
+- [x] **One-Click Launchers:**
+  - [x] `run.bat` for Windows (venv bootstrap + browser auto-launch).
+  - [x] `run.sh` for macOS / Linux (venv bootstrap + browser auto-launch).
+  - [x] Support fast path via `uv` if present on host.
 - [ ] **Release Bundling:**
   - [ ] Track or package production `dist/` in GitHub releases so end-users don't require Node.js.
   - [ ] Optional: `Dockerfile` & `docker-compose.yml` for containerized self-hosting.

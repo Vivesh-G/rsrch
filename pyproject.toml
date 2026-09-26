@@ -1,9 +1,10 @@
 [project]
-name = "rschr"
+name = "rsrch"
 version = "0.1.0"
-description = "Add your description here"
+description = "Rsrch Studio - Modern Local Academic & Research Workspace"
 readme = "README.md"
 requires-python = ">=3.11"
+scripts = { rsrch = "main:main" }
 dependencies = [
     "aiofiles>=25.1.0",
     "aiosqlite>=0.22.1",
