@@ -199,6 +199,10 @@ rsrch/
 ## Contribution
 Feel free to test the app and contribute to it!
 
+## License
+
+This software is distributed under a **Modified MIT License (Non-Commercial / Personal Use Only)**. It is free to use and inspect for personal, educational, and non-commercial research purposes. Any commercial use, redistribution for profit, SaaS hosting, or incorporation into commercial products requires a separate commercial license. See [LICENSE](LICENSE) for terms.
+
 ---
 
 Copyright © 2026 Vivesh G. All rights reserved.
