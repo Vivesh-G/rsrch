@@ -4,9 +4,6 @@ A minimalist research workspace for reading PDFs, taking markdown notes, and que
 
 Rsrch organizes papers into workspaces with a side-by-side view featuring an embedded PDF reader, a live markdown editor, and an AI chat assistant powered by Google Gemini.
 
-MVP Screenshot:
-<img width="1847" height="1015" alt="image" src="https://github.com/user-attachments/assets/a3f5d251-3d95-40d0-8755-2acbd449d88e" />
-
 ---
 
 ## Features
@@ -188,6 +185,12 @@ rsrch/
 | `DELETE` | `/api/chats/{id}` | Delete a chat session |
 
 ---
+
+MVP Screenshot:
+<img width="1847" height="1015" alt="image" src="https://github.com/user-attachments/assets/a3f5d251-3d95-40d0-8755-2acbd449d88e" />
+<img width="1841" height="969" alt="image" src="https://github.com/user-attachments/assets/9e37ac98-5fef-46fb-b9a8-84a3c09a5099" />
+
+
 
 ## Notes
 
