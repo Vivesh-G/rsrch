@@ -2,6 +2,7 @@ import os
 import asyncio
 import hashlib
 import shutil
+import uuid as _uuid
 from pathlib import Path
 from pydantic import BaseModel
 from diagnostics import parse_diagnostics, Diagnostic
@@ -31,7 +32,7 @@ def get_build_key(source_content: str, entrypoint: str) -> str:
 
 
 def _builds_root() -> Path:
-    return Path(__file__).parent / "data" / "latex_builds"
+    return settings.latex_builds_dir
 
 
 def _touch(path: Path) -> None:
@@ -111,7 +112,7 @@ def _prune_temp_orphans(max_age_s: float = 3600) -> None:
     """
     try:
         import time as _time
-        tmp_root = _builds_root().parent / "latex_temp"
+        tmp_root = settings.latex_temp_dir
         if not tmp_root.is_dir():
             return
         now_wall = _time.time()
@@ -154,17 +155,9 @@ async def run_compile(doc_id: str, source_content: str, workspace_id: str | None
     entrypoint = f"{doc_id}.tex"
     build_key = get_build_key(source_content, entrypoint)
 
-    # Store everything in the root data folder
-    base_data_dir = Path(__file__).parent / "data"
-    # Unique temp dir per attempt: the old shared `latex_temp/<doc_id>` dir
-    # let concurrent compiles for the same doc wipe/replace each other's
-    # .tex mid-run, so build <hash-A> could end up containing hash-B's PDF
-    # (stale/wrong PDF after save) or fail spuriously. Same-content
-    # concurrent runs share byte-identical input, so sharing the dir only
-    # within one attempt (token) is still race-free.
-    import uuid as _uuid
-    temp_dir = base_data_dir / "latex_temp" / f"{doc_id}_{build_key[:12]}_{_uuid.uuid4().hex[:8]}"
-    builds_dir = base_data_dir / "latex_builds" / build_key
+    base_data_dir = settings.data_dir
+    temp_dir = settings.latex_temp_dir / f"{doc_id}_{build_key[:12]}_{_uuid.uuid4().hex[:8]}"
+    builds_dir = settings.latex_builds_dir / build_key
     
     pdf_path = builds_dir / Path(entrypoint).with_suffix(".pdf").name
     log_path = builds_dir / Path(entrypoint).with_suffix(".log").name

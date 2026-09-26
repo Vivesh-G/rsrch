@@ -126,7 +126,7 @@ export const NewWorkspaceModal: React.FC<NewWorkspaceModalProps> = ({
             onKeyDown={(e) => {
               if (e.key === 'Enter') submit();
             }}
-            placeholder="Projects"
+            placeholder="Enter workspace name"
             maxLength={60}
           />
           <div className="modal-actions">

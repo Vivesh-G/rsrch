@@ -96,6 +96,13 @@ async def init_db():
                 FOREIGN KEY(document_id) REFERENCES documents(id) ON DELETE CASCADE
             );
         """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS app_settings (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL,
+                updated_at REAL NOT NULL
+            );
+        """)
         # Indexes for the hot paths: workspace doc lists, chat history,
         # and the LIKE search across document fields.
         await db.execute(
@@ -566,3 +573,48 @@ async def add_chat_message(
         )
         await db.commit()
         return dict(row)
+
+
+async def _ensure_settings_table(db: aiosqlite.Connection) -> None:
+    await db.execute("""
+        CREATE TABLE IF NOT EXISTS app_settings (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL,
+            updated_at REAL NOT NULL
+        );
+    """)
+    await db.commit()
+
+
+async def get_all_settings() -> Dict[str, str]:
+    async with get_db() as db:
+        await _ensure_settings_table(db)
+        cursor = await db.execute("SELECT key, value FROM app_settings")
+        rows = await cursor.fetchall()
+        return {r["key"]: r["value"] for r in rows}
+
+
+async def get_setting(key: str, default: Optional[str] = None) -> Optional[str]:
+    async with get_db() as db:
+        await _ensure_settings_table(db)
+        cursor = await db.execute("SELECT value FROM app_settings WHERE key = ?", (key,))
+        row = await cursor.fetchone()
+        return row["value"] if row else default
+
+
+async def set_settings(entries: Dict[str, Any]) -> None:
+    now = time.time()
+    async with get_db() as db:
+        await _ensure_settings_table(db)
+        for k, v in entries.items():
+            if v is not None:
+                await db.execute(
+                    """
+                    INSERT INTO app_settings (key, value, updated_at)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+                    """,
+                    (k, str(v), now),
+                )
+        await db.commit()
+

@@ -1,7 +1,7 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import type { Workspace } from '../types';
 import { api } from '../services/api';
-import { IconClose, IconDoc, IconPencil, IconSearch } from './Icons';
+import { IconClose, IconDoc } from './Icons';
 
 interface Asset {
   path: string;
@@ -41,6 +41,27 @@ export const AssetsPanel: React.FC<AssetsPanelProps> = ({
     fetchAssets();
   }, [fetchAssets]);
 
+  const uploadFiles = async (files: File[]) => {
+    if (!workspace || files.length === 0) return;
+    setIsUploading(true);
+    const formData = new FormData();
+    files.forEach((f) => formData.append('files', f));
+
+    try {
+      const res = await fetch(`${api.baseUrl}/workspaces/${workspace.id}/assets`, {
+        method: 'POST',
+        body: formData,
+      });
+      if (res.ok) {
+        fetchAssets();
+      }
+    } catch (err) {
+      console.error('Upload failed', err);
+    } finally {
+      setIsUploading(false);
+    }
+  };
+
   const handleDrag = (e: React.DragEvent) => {
     e.preventDefault();
     e.stopPropagation();
@@ -56,25 +77,8 @@ export const AssetsPanel: React.FC<AssetsPanelProps> = ({
     e.stopPropagation();
     setDragActive(false);
 
-    if (!workspace) return;
-    if (e.dataTransfer.files && e.dataTransfer.files[0]) {
-      setIsUploading(true);
-      const formData = new FormData();
-      Array.from(e.dataTransfer.files).forEach((f) => formData.append('files', f));
-      
-      try {
-        const res = await fetch(`${api.baseUrl}/workspaces/${workspace.id}/assets`, {
-          method: 'POST',
-          body: formData,
-        });
-        if (res.ok) {
-          fetchAssets();
-        }
-      } catch (err) {
-        console.error('Upload failed', err);
-      } finally {
-        setIsUploading(false);
-      }
+    if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+      await uploadFiles(Array.from(e.dataTransfer.files));
     }
   };
 

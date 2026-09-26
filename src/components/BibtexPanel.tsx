@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import type { Workspace } from '../types';
 import { api } from '../services/api';
-import { IconClose, IconPencil, IconCheck, IconSave } from './Icons';
+import { IconClose, IconCheck, IconSave } from './Icons';
 
 interface BibtexPanelProps {
   workspace: Workspace | null;
@@ -17,7 +17,6 @@ export const BibtexPanel: React.FC<BibtexPanelProps> = ({
   dragHandle,
 }) => {
   const [content, setContent] = useState('');
-  const [isSaving, setIsSaving] = useState(false);
   const [saveStatus, setSaveStatus] = useState<'idle' | 'saving' | 'saved'>('idle');
   const debounceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -39,7 +38,6 @@ export const BibtexPanel: React.FC<BibtexPanelProps> = ({
 
   const saveBibtex = useCallback(async (newContent: string) => {
     if (!workspace) return;
-    setIsSaving(true);
     setSaveStatus('saving');
     try {
       const res = await fetch(`${api.baseUrl}/workspaces/${workspace.id}/bibtex`, {
@@ -55,8 +53,6 @@ export const BibtexPanel: React.FC<BibtexPanelProps> = ({
     } catch (err) {
       console.error('Failed to save bibtex', err);
       setSaveStatus('idle');
-    } finally {
-      setIsSaving(false);
     }
   }, [workspace]);
 

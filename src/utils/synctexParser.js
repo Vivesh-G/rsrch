@@ -27,7 +27,7 @@ var parseSyncTex = function (pdfsyncBody) {
   if (pdfsyncBody == null) {
     return pdfsyncObject;
   }
-  var lineArray = pdfsyncBody.split("\n");
+  var lineArray = pdfsyncBody.split(/\r?\n/);
 
   pdfsyncObject.version = lineArray[0].replace('SyncTeX Version:', '');
 

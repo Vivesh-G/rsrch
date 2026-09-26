@@ -95,7 +95,37 @@ class ChatSessionResponse(BaseModel):
 class ChatSendRequest(BaseModel):
     message: str = Field(min_length=1, max_length=4000)
     document_ids: List[str] = Field(default_factory=list, max_length=3)
+    api_key: Optional[str] = Field(default=None, max_length=200)
+    model: Optional[str] = Field(default=None, max_length=60)
 
 
 class ChatSendResponse(BaseModel):
     message: ChatMessage
+
+
+class SettingsResponse(BaseModel):
+    user_name: str = "Researcher"
+    user_affiliation: str = ""
+    gemini_model: str = "gemini-3.5-flash-lite"
+    gemini_api_key_set: bool = False
+    gemini_api_key_masked: str = ""
+    ai_temperature: float = 0.7
+    ai_persona: str = "academic"
+    auto_compile_delay: int = 1500
+    editor_font_size: int = 13
+    editor_word_wrap: bool = True
+    editor_line_numbers: bool = True
+
+
+class SettingsUpdate(BaseModel):
+    user_name: Optional[str] = Field(default=None, max_length=60)
+    user_affiliation: Optional[str] = Field(default=None, max_length=100)
+    gemini_model: Optional[str] = Field(default=None, max_length=60)
+    gemini_api_key: Optional[str] = Field(default=None, max_length=200)
+    ai_temperature: Optional[float] = Field(default=None, ge=0.0, le=2.0)
+    ai_persona: Optional[str] = Field(default=None, max_length=50)
+    auto_compile_delay: Optional[int] = Field(default=None, ge=0, le=10000)
+    editor_font_size: Optional[int] = Field(default=None, ge=10, le=24)
+    editor_word_wrap: Optional[bool] = None
+    editor_line_numbers: Optional[bool] = None
+

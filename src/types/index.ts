@@ -58,3 +58,19 @@ export interface ChatSession {
   created_at: number;
   updated_at: number;
 }
+
+export interface AppSettings {
+  user_name: string;
+  user_affiliation: string;
+  gemini_model: string;
+  gemini_api_key?: string;
+  gemini_api_key_set: boolean;
+  gemini_api_key_masked: string;
+  ai_temperature: number;
+  ai_persona: 'academic' | 'concise' | 'pedagogical' | string;
+  auto_compile_delay: number;
+  editor_font_size: number;
+  editor_word_wrap?: boolean;
+  editor_line_numbers?: boolean;
+}
+

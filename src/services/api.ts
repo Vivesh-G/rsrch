@@ -1,4 +1,4 @@
-import type { Workspace, DocumentItem, NoteData, ChatMessage, ChatSession } from '../types';
+import type { Workspace, DocumentItem, NoteData, ChatMessage, ChatSession, AppSettings } from '../types';
 
 // Production builds may serve the frontend from a different origin than the
 // API — VITE_API_URL lets the deploy point at it (dev falls back to the
@@ -189,4 +189,25 @@ export const api = {
   async deleteChat(chatId: string): Promise<void> {
     await req<void>(`/chats/${enc(chatId)}`, { method: 'DELETE' });
   },
+
+  async getSettings(): Promise<AppSettings> {
+    return await req<AppSettings>('/settings');
+  },
+
+  async updateSettings(settings: Partial<AppSettings>): Promise<AppSettings> {
+    return await req<AppSettings>('/settings', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(settings),
+    });
+  },
+
+  async testApiKey(apiKey?: string): Promise<{ valid: boolean; message?: string; error?: string }> {
+    return await req<{ valid: boolean; message?: string; error?: string }>('/settings/test-key', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ api_key: apiKey }),
+    });
+  },
 };
+

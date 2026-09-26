@@ -257,7 +257,7 @@ const NotesPanelInner: React.FC<NotesPanelProps> = ({
                 <form className="tag-custom-form" onSubmit={handleCustomTagSubmit}>
                   <input
                     type="text"
-                    placeholder="Custom tag…"
+                    placeholder="Enter custom tag…"
                     aria-label="Custom tag"
                     value={customTagInput}
                     onChange={(e) => setCustomTagInput(e.target.value.slice(0, MAX_TAG_LEN))}

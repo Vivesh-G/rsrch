@@ -1,5 +1,15 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { IconSun, IconMoon, IconMaximize, IconMinimize, IconKeyboard, IconSearch, IconPlus, IconChat, IconLogo } from './Icons';
+import {
+  IconSun,
+  IconMoon,
+  IconMaximize,
+  IconMinimize,
+  IconKeyboard,
+  IconSearch,
+  IconPlus,
+  IconChat,
+  IconLogo,
+} from './Icons';
 import { KeyboardShortcutsModal } from './KeyboardShortcutsModal';
 
 interface TopBarProps {
@@ -9,6 +19,9 @@ interface TopBarProps {
   onSelectOverview: () => void;
   isChatOpen: boolean;
   onToggleChat: () => void;
+  userName?: string;
+  hasApiKey?: boolean;
+  onOpenSettings?: () => void;
 }
 
 const TopBarInner: React.FC<TopBarProps> = ({
@@ -18,6 +31,9 @@ const TopBarInner: React.FC<TopBarProps> = ({
   onSelectOverview,
   isChatOpen,
   onToggleChat,
+  userName = 'Researcher',
+  hasApiKey = true,
+  onOpenSettings,
 }) => {
   const [isDark, setIsDark] = useState<boolean>(() => {
     // Same source of truth as the pre-paint script in index.html.
@@ -97,6 +113,9 @@ const TopBarInner: React.FC<TopBarProps> = ({
     }
   };
 
+  const displayName = userName.trim() || 'Researcher';
+  const userInitial = displayName[0].toUpperCase();
+
   return (
     <>
       <header className="topbar">
@@ -169,10 +188,19 @@ const TopBarInner: React.FC<TopBarProps> = ({
           >
             {isFullscreen ? <IconMinimize size={15} /> : <IconMaximize size={15} />}
           </button>
-          <div className="user">
-            <div className="avatar">V</div>
-            <span>Vives</span>
-          </div>
+          <button
+            className="user user-btn"
+            id="userProfileBtn"
+            title="Profile & Settings"
+            onClick={onOpenSettings}
+            type="button"
+          >
+            <div className="avatar">{userInitial}</div>
+            <span>{displayName}</span>
+            {!hasApiKey && (
+              <span className="user-warning-dot" title="API Key not configured" />
+            )}
+          </button>
         </div>
       </header>
 

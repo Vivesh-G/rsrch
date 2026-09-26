@@ -218,6 +218,7 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
                               onClick={(e) => e.stopPropagation()}
                               onDoubleClick={(e) => e.stopPropagation()}
                               maxLength={120}
+                              placeholder="Enter title"
                             />
                           ) : (
                             <span

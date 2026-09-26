@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo, useDeferredValue, Suspense, lazy } from 'react';
-import type { Workspace, DocumentItem } from './types';
+import type { Workspace, DocumentItem, AppSettings } from './types';
 import { api } from './services/api';
 import { TopBar } from './components/TopBar';
 import { Sidebar } from './components/Sidebar';
@@ -10,6 +10,7 @@ import { AssetsPanel } from './components/AssetsPanel';
 import { BibtexPanel } from './components/BibtexPanel';
 import { ChatPanel, PERSISTED_CHAT_KEY } from './components/ChatPanel';
 import { ConfirmModal, NewWorkspaceModal } from './components/Modals';
+import { SettingsModal } from './components/SettingsModal';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { RightSidebar } from './components/RightSidebar';
 import { Reorder, useDragControls } from 'framer-motion';
@@ -143,6 +144,88 @@ export const App: React.FC = () => {
   const [saveStatus, setSaveStatus] = useState<'saved' | 'saving' | 'idle' | 'error'>('idle');
   const [lastSavedTime, setLastSavedTime] = useState<string | null>(null);
   const saveTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const [settings, setSettings] = useState<AppSettings>(() => {
+    const defaults: AppSettings = {
+      user_name: 'Researcher',
+      user_affiliation: '',
+      gemini_model: 'gemini-3.5-flash-lite',
+      gemini_api_key_set: false,
+      gemini_api_key_masked: '',
+      ai_temperature: 0.7,
+      ai_persona: 'academic',
+      auto_compile_delay: 1500,
+      editor_font_size: 13,
+      editor_word_wrap: true,
+      editor_line_numbers: true,
+    };
+    try {
+      const stored = localStorage.getItem('rsrch-settings');
+      if (stored) return { ...defaults, ...JSON.parse(stored) };
+    } catch {}
+    return defaults;
+  });
+
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [isFirstRun, setIsFirstRun] = useState(false);
+
+  const autoCompileDelayRef = useRef(settings.auto_compile_delay ?? 1500);
+  useEffect(() => {
+    autoCompileDelayRef.current = settings.auto_compile_delay ?? 1500;
+  }, [settings.auto_compile_delay]);
+
+  // Load settings from backend on startup, and trigger first-run modal if not onboarded
+  useEffect(() => {
+    let mounted = true;
+    api
+      .getSettings()
+      .then((backendSettings) => {
+        if (!mounted) return;
+        setSettings((prev) => {
+          const merged = { ...prev, ...backendSettings };
+          try {
+            localStorage.setItem('rsrch-settings', JSON.stringify(merged));
+          } catch {}
+          return merged;
+        });
+        const onboarded = localStorage.getItem('rsrch-onboarded');
+        if (!onboarded && !backendSettings.gemini_api_key_set) {
+          setIsFirstRun(true);
+          setIsSettingsOpen(true);
+        }
+      })
+      .catch(() => {
+        const onboarded = localStorage.getItem('rsrch-onboarded');
+        if (!onboarded) {
+          setIsFirstRun(true);
+          setIsSettingsOpen(true);
+        }
+      });
+    return () => {
+      mounted = false;
+    };
+  }, []);
+
+  // Update CSS variables when settings change (like font size)
+  useEffect(() => {
+    document.documentElement.style.setProperty(
+      '--editor-font-size',
+      `${settings.editor_font_size || 13}px`
+    );
+  }, [settings.editor_font_size]);
+
+  const handleSaveSettings = useCallback(async (updated: Partial<AppSettings>) => {
+    try {
+      const saved = await api.updateSettings(updated);
+      setSettings(saved);
+      localStorage.setItem('rsrch-settings', JSON.stringify(saved));
+      localStorage.setItem('rsrch-onboarded', 'true');
+      setIsFirstRun(false);
+    } catch (err) {
+      console.error('Failed to save settings to server:', err);
+      throw err;
+    }
+  }, []);
 
   const [sidebarWidth, setSidebarWidth] = usePersistentState<number>('rschr-sidew', 240);
   const [isViewerOpen, setIsViewerOpen] = usePersistentState<boolean>('rschr-viewer-open', true);
@@ -664,18 +747,20 @@ export const App: React.FC = () => {
   const handleNoteChange = useCallback((newContent: string) => {
     const id = activeDocIdRef.current;
     if (!id) return;
-    // Instant UI update; persist debounced to avoid localStorage +
-    // network on every keystroke (was the main typing-jank source).
+    // 1. Instant UI & cache update so UI, refs, and manual save never read stale content
     setNotesCache((prev) => (prev[id] === newContent ? prev : { ...prev, [id]: newContent }));
+    try {
+      localStorage.setItem(`rsrch-note-${id}`, newContent);
+    } catch {}
+
+    // 2. Persist to backend & compile with debounced delay
+    const delay = autoCompileDelayRef.current === 0 ? 800 : (autoCompileDelayRef.current || 1500);
     if (noteSaveTimerRef.current) clearTimeout(noteSaveTimerRef.current);
     noteSaveTimerRef.current = setTimeout(async () => {
       try {
-        localStorage.setItem(`rsrch-note-${id}`, newContent);
-      } catch {}
-      try {
         await api.saveNote(id, newContent);
         const targetDoc = workspacesRef.current.flatMap((w) => w.docs).find((d) => d.id === id);
-        if (targetDoc?.doc_type === 'latex') {
+        if (targetDoc?.doc_type === 'latex' && autoCompileDelayRef.current !== 0) {
           const res = await api.compileDocument(id);
           if (res?.status === 'success') {
             window.dispatchEvent(new CustomEvent('rsrch:latex-compiled', { detail: { docId: id } }));
@@ -692,7 +777,35 @@ export const App: React.FC = () => {
       } catch (err) {
         console.warn('Save or compile failed', err);
       }
-    }, 800);
+    }, delay);
+  }, []);
+
+  // Flush any pending note save when switching tabs, closing, or reloading
+  useEffect(() => {
+    const flushPending = () => {
+      const id = activeDocIdRef.current;
+      if (!id || !noteSaveTimerRef.current) return;
+      clearTimeout(noteSaveTimerRef.current);
+      noteSaveTimerRef.current = null;
+      const content = notesCacheRef.current[id];
+      if (content !== undefined) {
+        try {
+          localStorage.setItem(`rsrch-note-${id}`, content);
+        } catch {}
+        api.saveNote(id, content).catch(() => {});
+      }
+    };
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'hidden') {
+        flushPending();
+      }
+    };
+
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    };
   }, []);
 
   // Add to note from PDF selection citation — stable ref-based callback.
@@ -748,20 +861,30 @@ export const App: React.FC = () => {
     let compileOk = true;
     try {
       await api.saveNote(id, contentToSave);
-      const targetDoc = workspacesRef.current.flatMap((w) => w.docs).find((d) => d.id === id);
-      if (targetDoc?.doc_type === 'latex') {
-        const res = await api.compileDocument(id);
-        if (res?.status === 'success') {
-          window.dispatchEvent(new CustomEvent('rsrch:latex-compiled', { detail: { docId: id } }));
-          window.dispatchEvent(new CustomEvent('rsrch:latex-errors', { detail: { docId: id, errors: [] } }));
-        } else if (res?.status === 'error' || res?.status === 'timeout') {
-          compileOk = false;
-          window.dispatchEvent(new CustomEvent('rsrch:latex-errors', { detail: { docId: id, errors: res.diagnostics ?? res.errors ?? [] } }));
-        }
-      }
     } catch (err) {
       compileOk = false;
       console.warn('API saveNote failed, saved locally:', err);
+    }
+    // Compile is a separate step: a 500 here previously surfaced as
+    // "saveNote failed" because both calls shared one try/catch.
+    if (compileOk) {
+      try {
+        const targetDoc = workspacesRef.current.flatMap((w) => w.docs).find((d) => d.id === id);
+        if (targetDoc?.doc_type === 'latex') {
+          const res = await api.compileDocument(id);
+          if (res?.status === 'success') {
+            window.dispatchEvent(new CustomEvent('rsrch:latex-compiled', { detail: { docId: id } }));
+            window.dispatchEvent(new CustomEvent('rsrch:latex-errors', { detail: { docId: id, errors: [] } }));
+          } else if (res?.status === 'error' || res?.status === 'timeout') {
+            compileOk = false;
+            console.warn('LaTeX compile returned diagnostics:', res.diagnostics ?? res.errors);
+            window.dispatchEvent(new CustomEvent('rsrch:latex-errors', { detail: { docId: id, errors: res.diagnostics ?? res.errors ?? [] } }));
+          }
+        }
+      } catch (err) {
+        compileOk = false;
+        console.warn('API compileDocument failed:', err);
+      }
     }
 
     const timeStr = new Date().toLocaleTimeString('en-US', {
@@ -789,6 +912,33 @@ export const App: React.FC = () => {
     window.addEventListener('keydown', handleGlobalKeyDown);
     return () => window.removeEventListener('keydown', handleGlobalKeyDown);
   }, [handleManualSave]);
+
+  // Inverse-search fallback: the LaTeX editor lives inside NotesPanel, so
+  // when that panel is closed there is no rsrch:inverse-sync listener and
+  // "Go to Block" silently does nothing. Open the panel and replay the
+  // event once the editor has mounted. Replays carry __replayed so this
+  // handler never loops on itself.
+  const isNotesOpenRef = useRef(isNotesOpen);
+  isNotesOpenRef.current = isNotesOpen;
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent).detail;
+      if (!detail?.docId || detail.__replayed) return;
+      if (detail.docId !== activeDocIdRef.current) return;
+      if (isNotesOpenRef.current) return; // editor handles it directly
+      setIsNotesOpen(true);
+      const replay = { ...detail, __replayed: true };
+      // Panel mount + CodeMirror view creation take a frame or two;
+      // replay once after they settle so the editor can handle it.
+      // (Single replay: a second one would re-steal focus/scroll.)
+      setTimeout(
+        () => window.dispatchEvent(new CustomEvent('rsrch:inverse-sync', { detail: replay })),
+        450,
+      );
+    };
+    window.addEventListener('rsrch:inverse-sync', handler);
+    return () => window.removeEventListener('rsrch:inverse-sync', handler);
+  }, [setIsNotesOpen]);
 
   // Resizing Logic — rAF-throttled so mousemove (100+ Hz) commits at
   // most one React render per frame instead of one per event.
@@ -1079,6 +1229,9 @@ export const App: React.FC = () => {
         onSelectOverview={handleSelectOverview}
         isChatOpen={isChatOpen}
         onToggleChat={handleToggleChat}
+        userName={settings.user_name}
+        hasApiKey={settings.gemini_api_key_set}
+        onOpenSettings={() => setIsSettingsOpen(true)}
       />
 
       <div
@@ -1376,6 +1529,18 @@ export const App: React.FC = () => {
         confirmLabel="Delete"
         onCancel={() => setPendingDelete(null)}
         onConfirm={confirmPendingDelete}
+      />
+      <SettingsModal
+        isOpen={isSettingsOpen}
+        onClose={() => {
+          setIsSettingsOpen(false);
+          try {
+            localStorage.setItem('rsrch-onboarded', 'true');
+          } catch {}
+        }}
+        settings={settings}
+        onSaveSettings={handleSaveSettings}
+        isFirstRun={isFirstRun}
       />
     </div>
   );

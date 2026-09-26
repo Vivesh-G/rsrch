@@ -36,6 +36,9 @@ from database import (
     delete_chat,
     get_chat_messages,
     add_chat_message,
+    get_all_settings,
+    get_setting,
+    set_settings,
 )
 from config import settings
 from models import (
@@ -52,6 +55,8 @@ from models import (
     ChatSessionResponse,
     ChatSendRequest,
     ChatSendResponse,
+    SettingsResponse,
+    SettingsUpdate,
 )
 
 from compiler import run_compile, get_build_key, prune_all_builds
@@ -347,17 +352,25 @@ async def upload_workspace_assets(ws_id: str, files: List[UploadFile] = File(...
     target_dir.mkdir(parents=True, exist_ok=True)
     
     import aiofiles
+    from pathlib import Path
     uploaded = []
     for file in files:
         if not file.filename:
             continue
-            
+        # Sanitize filename: strip directories, block traversal / absolute
+        # paths (was: file_target_dir / file.filename allowed "../evil").
+        safe_name = Path(file.filename).name.strip()
+        if not safe_name or safe_name in (".", ".."):
+            raise HTTPException(status_code=400, detail="Invalid filename")
+        if "/" in safe_name or "\\" in safe_name:
+            raise HTTPException(status_code=400, detail="Invalid filename")
+
         file_target_dir = target_dir
-        if file.filename.lower().endswith(('.sty', '.cls', '.bst')):
+        if safe_name.lower().endswith(('.sty', '.cls', '.bst')):
             file_target_dir = settings.data_dir / "workspaces" / ws_id / "assets"
-            
+
         file_target_dir.mkdir(parents=True, exist_ok=True)
-        save_path = file_target_dir / file.filename
+        save_path = file_target_dir / safe_name
         
         async with aiofiles.open(str(save_path), "wb") as out:
             while True:
@@ -367,7 +380,7 @@ async def upload_workspace_assets(ws_id: str, files: List[UploadFile] = File(...
                 await out.write(chunk)
         
         rel_path = save_path.relative_to(settings.data_dir / "workspaces" / ws_id / "assets").as_posix()
-        uploaded.append({"path": rel_path, "filename": file.filename})
+        uploaded.append({"path": rel_path, "filename": safe_name})
         
     return {"status": "success", "uploaded": uploaded}
 
@@ -570,6 +583,43 @@ async def send_chat_message(chat_id: str, request: ChatSendRequest):
 
     await add_chat_message(chat_id, primary_doc_id, role="user", content=request.message)
 
+    db_settings = await get_all_settings()
+    db_key = db_settings.get("gemini_api_key", "").strip()
+    env_key = os.environ.get("GEMINI_API_KEY", "").strip()
+    effective_key = (request.api_key or "").strip() or db_key or env_key
+
+    if not effective_key:
+        fallback_msg = (
+            "**Gemini API Key Required**\n\n"
+            "Please configure your Gemini API Key in **Settings** (click your profile or the gear icon in the top right) to enable AI research assistance.\n\n"
+            "You can get a free key from [Google AI Studio](https://aistudio.google.com/app/apikey)."
+        )
+        saved_msg = await add_chat_message(chat_id, primary_doc_id, role="assistant", content=fallback_msg)
+        return {"message": saved_msg}
+
+    effective_model = (request.model or "").strip() or db_settings.get("gemini_model") or settings.gemini_model
+    effective_persona = db_settings.get("ai_persona", "academic")
+    user_name = db_settings.get("user_name", "Researcher")
+    affiliation = db_settings.get("user_affiliation", "")
+
+    try:
+        temp = float(db_settings.get("ai_temperature", 0.7))
+    except (ValueError, TypeError):
+        temp = 0.7
+
+    persona_prefix = f"You are assisting {user_name}"
+    if affiliation:
+        persona_prefix += f" ({affiliation})"
+
+    if effective_persona == "academic":
+        persona_style = "Provide rigorous, academically sound explanations with accurate citations and LaTeX math formulas ($...$ or $$...$$) where applicable."
+    elif effective_persona == "concise":
+        persona_style = "Be direct, concise, and prioritize high-density key points or summaries."
+    elif effective_persona == "pedagogical":
+        persona_style = "Explain concepts clearly step-by-step with intuitive examples and derivations."
+    else:
+        persona_style = ""
+
     if context_docs:
         per_doc = CHAT_CONTEXT_CHARS // len(context_docs)
         parts = []
@@ -583,27 +633,31 @@ async def send_chat_message(chat_id: str, request: ChatSendRequest):
             parts.append(f"[{label}]\n{text}")
         context_block = "\n\n---\n\n".join(parts)
         system_instruction = (
-            "You are a helpful AI assistant. Answer the user's questions "
-            f"based on the following document context:\n\n{context_block}"
-        )
+            f"{persona_prefix}. {persona_style}\n\n"
+            "Answer the user's questions based on the following document context:\n\n"
+            f"{context_block}"
+        ).strip()
     else:
-        system_instruction = "You are a helpful AI assistant. Answer the user's questions."
+        system_instruction = f"{persona_prefix}. {persona_style}\nYou are a helpful AI assistant. Answer the user's questions.".strip()
 
     # Bounded history: most recent N of THIS chat, chronological.
     # get_chat_messages returns the tail in order — no extra slicing.
     history = await get_chat_messages(chat_id, limit=CHAT_HISTORY_LIMIT)
 
     def _generate():
-        client = get_genai_client()
+        client = genai.Client(api_key=effective_key)
         contents = []
         for msg in history:
             role = "model" if msg["role"] == "assistant" else "user"
             contents.append({"role": role, "parts": [{"text": msg["content"]}]})
 
         response = client.models.generate_content(
-            model=settings.gemini_model,
+            model=effective_model,
             contents=contents,
-            config={'system_instruction': system_instruction}
+            config={
+                'system_instruction': system_instruction,
+                'temperature': temp,
+            }
         )
         return response.text or ""
 
@@ -617,7 +671,7 @@ async def send_chat_message(chat_id: str, request: ChatSendRequest):
         model_reply = "Sorry, the model took too long to respond. Please try again."
     except Exception as e:
         logger.warning("Gemini API error on chat %s: %s", chat_id, e)
-        model_reply = "Sorry, I encountered an error communicating with Gemini API."
+        model_reply = f"Sorry, I encountered an error communicating with Gemini API: {e}"
 
     saved_msg = await add_chat_message(chat_id, primary_doc_id, role="assistant", content=model_reply)
 
@@ -637,6 +691,127 @@ async def delete_chat_session(chat_id: str):
     # Drop its rate-limit window too.
     _chat_hits.pop(chat_id, None)
     return {"success": True, "id": chat_id}
+
+
+def mask_key(k: str) -> str:
+    if not k:
+        return ""
+    if len(k) <= 8:
+        return "••••" + k[-2:]
+    return k[:4] + "••••••••" + k[-4:]
+
+
+@app.get("/api/settings", response_model=SettingsResponse)
+async def get_app_settings():
+    db_settings = await get_all_settings()
+    env_key = os.environ.get("GEMINI_API_KEY", "").strip()
+    db_key = db_settings.get("gemini_api_key", "").strip()
+    effective_key = db_key or env_key
+
+    try:
+        temp = float(db_settings.get("ai_temperature", 0.7))
+    except (ValueError, TypeError):
+        temp = 0.7
+
+    try:
+        delay = int(db_settings.get("auto_compile_delay", 1500))
+    except (ValueError, TypeError):
+        delay = 1500
+
+    try:
+        font_size = int(db_settings.get("editor_font_size", 13))
+    except (ValueError, TypeError):
+        font_size = 13
+
+    word_wrap_raw = db_settings.get("editor_word_wrap")
+    word_wrap = True if word_wrap_raw is None else (word_wrap_raw.lower() in ("true", "1", "yes"))
+
+    line_nums_raw = db_settings.get("editor_line_numbers")
+    line_nums = True if line_nums_raw is None else (line_nums_raw.lower() in ("true", "1", "yes"))
+
+    return SettingsResponse(
+        user_name=db_settings.get("user_name", "Researcher"),
+        user_affiliation=db_settings.get("user_affiliation", ""),
+        gemini_model=db_settings.get("gemini_model", settings.gemini_model or "gemini-3.5-flash-lite"),
+        gemini_api_key_set=bool(effective_key),
+        gemini_api_key_masked=mask_key(effective_key),
+        ai_temperature=temp,
+        ai_persona=db_settings.get("ai_persona", "academic"),
+        auto_compile_delay=delay,
+        editor_font_size=font_size,
+        editor_word_wrap=word_wrap,
+        editor_line_numbers=line_nums,
+    )
+
+
+@app.put("/api/settings", response_model=SettingsResponse)
+async def update_app_settings(update: SettingsUpdate):
+    to_save = {}
+    if update.user_name is not None:
+        to_save["user_name"] = update.user_name.strip()
+    if update.user_affiliation is not None:
+        to_save["user_affiliation"] = update.user_affiliation.strip()
+    if update.gemini_model is not None:
+        to_save["gemini_model"] = update.gemini_model.strip()
+    if update.gemini_api_key is not None:
+        cleaned_key = update.gemini_api_key.strip()
+        to_save["gemini_api_key"] = cleaned_key
+        if cleaned_key:
+            os.environ["GEMINI_API_KEY"] = cleaned_key
+            global _genai_client
+            _genai_client = None
+    if update.ai_temperature is not None:
+        to_save["ai_temperature"] = update.ai_temperature
+    if update.ai_persona is not None:
+        to_save["ai_persona"] = update.ai_persona
+    if update.auto_compile_delay is not None:
+        to_save["auto_compile_delay"] = update.auto_compile_delay
+    if update.editor_font_size is not None:
+        to_save["editor_font_size"] = update.editor_font_size
+    if update.editor_word_wrap is not None:
+        to_save["editor_word_wrap"] = str(update.editor_word_wrap).lower()
+    if update.editor_line_numbers is not None:
+        to_save["editor_line_numbers"] = str(update.editor_line_numbers).lower()
+
+    if to_save:
+        await set_settings(to_save)
+
+    return await get_app_settings()
+
+
+class TestKeyPayload(BaseModel):
+    api_key: Optional[str] = None
+
+
+@app.post("/api/settings/test-key")
+async def test_api_key(payload: Optional[TestKeyPayload] = None):
+    try:
+        db_key = await get_setting("gemini_api_key")
+    except Exception:
+        db_key = ""
+    env_key = os.environ.get("GEMINI_API_KEY", "")
+    key = ((payload.api_key if payload else "") or db_key or env_key or "").strip()
+
+    if not key:
+        return {"valid": False, "error": "No API key provided or configured"}
+
+    def _probe():
+        client = genai.Client(api_key=key)
+        # Validate key by listing models with page_size=1 (costs 0 tokens, checks key directly with Google)
+        for _ in client.models.list(config={'page_size': 1}):
+            break
+        return True
+
+    try:
+        await asyncio.wait_for(asyncio.to_thread(_probe), timeout=10.0)
+        return {"valid": True, "message": "API key verified successfully!"}
+    except Exception as e:
+        logger.warning("API key verification failed: %s", e)
+        err_str = str(e)
+        if "API key not valid" in err_str or "API_KEY_INVALID" in err_str:
+            err_str = "API key is invalid. Please verify your key from Google AI Studio."
+        return {"valid": False, "error": err_str}
+
 
 
 # Production frontend serving. Paths come from config.settings so exe

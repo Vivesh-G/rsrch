@@ -19,7 +19,7 @@ import { lintGutter, setDiagnostics, linter } from '@codemirror/lint';
 import { katexPlugin } from './katexDecoration';
 import { LATEX_SLASH_COMMANDS, type LatexSlashCommand } from './latexAutocomplete';
 import { api } from '../services/api';
-import { fetchAndParseSynctex, syncTexLineToRect, syncTexRectToLine } from '../utils/synctex';
+import { fetchAndParseSynctex, invalidateSynctexCache, syncTexLineToRect, syncTexRectToLine } from '../utils/synctex';
 
 const selectionTooltip = StateField.define<Tooltip | null>({
   create: getCursorTooltip,
@@ -193,24 +193,48 @@ export const CodeMirrorLatexEditor: React.FC<CodeMirrorLatexEditorProps> = ({
       const currentDocId = docIdRef.current;
       const detail = (e as CustomEvent).detail;
       if (!detail || detail.docId !== currentDocId) return;
+      if (detail.page == null || detail.x == null || detail.y == null) {
+        console.warn('Go to Block: incomplete click coordinates', detail);
+        return;
+      }
       fetchAndParseSynctex(currentDocId).then((data) => {
-        if (!data) return;
-        const block = syncTexRectToLine(data, detail.page, detail.x, detail.y);
+        if (!data) {
+          console.warn('Go to Block: no SyncTeX data (compile may have failed)');
+          return;
+        }
+        if (!data.blocks.length) {
+          console.warn('Go to Block: SyncTeX map is empty — recompile and retry');
+          return;
+        }
+        const block = syncTexRectToLine(data, detail.page, detail.x, detail.y, {
+          fx: detail.fx,
+          fy: detail.fy,
+        });
         if (block && block.line) {
           const view = viewRef.current;
           if (view) {
-            const line = view.state.doc.line(Math.min(block.line, view.state.doc.lines));
+            const clamped = Math.min(Math.max(1, block.line), view.state.doc.lines);
+            const line = view.state.doc.line(clamped);
             view.dispatch({
               selection: { anchor: line.from },
-              scrollIntoView: true,
+              effects: EditorView.scrollIntoView(line.from, { y: 'center' }),
             });
             view.focus();
           }
+        } else {
+          console.warn(
+            `Go to Block: no source block on page ${detail.page} — stale SyncTeX? Recompile and retry.`
+          );
         }
-      });
+      }).catch((err) => console.warn('Go to Block failed:', err));
     };
+    const handleCompiled = () => invalidateSynctexCache(docIdRef.current);
     window.addEventListener('rsrch:inverse-sync', handleInverseSync);
-    return () => window.removeEventListener('rsrch:inverse-sync', handleInverseSync);
+    window.addEventListener('rsrch:latex-compiled', handleCompiled);
+    return () => {
+      window.removeEventListener('rsrch:inverse-sync', handleInverseSync);
+      window.removeEventListener('rsrch:latex-compiled', handleCompiled);
+    };
   }, [docId]);
 
   const bibEntriesRef = useRef(bibEntries);

@@ -155,6 +155,7 @@ const WorkspaceOverviewInner: React.FC<WorkspaceOverviewProps> = ({
                   }}
                   onClick={(e) => e.stopPropagation()}
                   maxLength={120}
+                  placeholder="Enter title"
                 />
               ) : (
                 <b>{d.note_title || baseName(d.name)}</b>

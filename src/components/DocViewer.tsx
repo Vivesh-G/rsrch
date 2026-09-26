@@ -579,21 +579,30 @@ const SelectionMenu: React.FC<{
           if (match) {
             const pageIndex = parseInt(match[1], 10);
             const pageRect = pageEl.getBoundingClientRect();
+            if (pageRect.width <= 0 || pageRect.height <= 0) return;
             const x = rect.left - pageRect.left;
             const y = rect.top - pageRect.top;
-            
+            // Send DOM fractions (size-independent) + legacy pt estimate.
+            // The matcher prefers fx/fy mapped through the page's own
+            // SyncTeX extents, so A4/letter/custom sizes all work.
+            const fx = Math.min(1, Math.max(0, x / pageRect.width));
+            const fy = Math.min(1, Math.max(0, y / pageRect.height));
             const pdfWidth = 595.28;
             const pdfHeight = 841.89;
-            const pdfX = (x / pageRect.width) * pdfWidth;
-            const pdfY = (y / pageRect.height) * pdfHeight;
-            
+            const pdfX = fx * pdfWidth;
+            const pdfY = fy * pdfHeight;
+
             window.dispatchEvent(
               new CustomEvent('rsrch:inverse-sync', {
-                detail: { docId: documentId, page: pageIndex + 1, x: pdfX, y: pdfY }
+                detail: { docId: documentId, page: pageIndex + 1, x: pdfX, y: pdfY, fx, fy }
               })
             );
             selection?.forDocument(documentId)?.clear();
+          } else {
+            console.warn('Go to Block: page index not found');
           }
+        } else {
+          console.warn('Go to Block: selection is outside a PDF page layer');
         }
       }
     } catch (err) {
@@ -1087,6 +1096,7 @@ const LoadedViewer: React.FC<DocViewerProps> = ({
                 }}
                 onClick={(e) => e.stopPropagation()}
                 maxLength={120}
+                placeholder="Enter title"
               />
             ) : (
               <span
@@ -1170,15 +1180,14 @@ const LoadedViewer: React.FC<DocViewerProps> = ({
           if (!match) return;
           const pageIndex = parseInt(match[1], 10);
           const rect = pageEl.getBoundingClientRect();
-          const x = e.clientX - rect.left;
-          const y = e.clientY - rect.top;
+          if (rect.width <= 0 || rect.height <= 0) return;
+          const fx = Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width));
+          const fy = Math.min(1, Math.max(0, (e.clientY - rect.top) / rect.height));
           const pdfWidth = 595.28;
           const pdfHeight = 841.89;
-          const pdfX = (x / rect.width) * pdfWidth;
-          const pdfY = (y / rect.height) * pdfHeight;
           window.dispatchEvent(
             new CustomEvent('rsrch:inverse-sync', {
-              detail: { docId: doc.id, page: pageIndex + 1, x: pdfX, y: pdfY }
+              detail: { docId: doc.id, page: pageIndex + 1, x: fx * pdfWidth, y: fy * pdfHeight, fx, fy }
             })
           );
         }}
