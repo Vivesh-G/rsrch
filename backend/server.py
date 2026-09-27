@@ -14,7 +14,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pathlib import Path, PureWindowsPath
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from database import (
     init_db,
@@ -389,13 +389,25 @@ async def upload_workspace_assets(ws_id: str, files: List[UploadFile] = File(...
 
         file_target_dir.mkdir(parents=True, exist_ok=True)
         save_path = file_target_dir / safe_name
-        
+
+        total = 0
+        too_large = False
         async with aiofiles.open(str(save_path), "wb") as out:
             while True:
                 chunk = await file.read(1024 * 1024)
                 if not chunk:
                     break
+                total += len(chunk)
+                if total > MAX_UPLOAD_BYTES:
+                    too_large = True
+                    break
                 await out.write(chunk)
+        if too_large:
+            try:
+                save_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise HTTPException(status_code=413, detail="File too large")
         
         rel_path = save_path.relative_to(settings.data_dir / "workspaces" / ws_id / "assets").as_posix()
         uploaded.append({"path": rel_path, "filename": safe_name})
@@ -403,7 +415,7 @@ async def upload_workspace_assets(ws_id: str, files: List[UploadFile] = File(...
     return {"status": "success", "uploaded": uploaded}
 
 class BibtexUpdate(BaseModel):
-    content: str
+    content: str = Field(default="", max_length=200_000)
 
 @app.get("/api/workspaces/{ws_id}/bibtex")
 async def get_bibtex(ws_id: str):
@@ -547,11 +559,17 @@ async def delete_doc(doc_id: str):
 # Notes
 @app.get("/api/documents/{doc_id}/note", response_model=NoteResponse)
 async def read_doc_note(doc_id: str):
+    doc = await get_document(doc_id)
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found")
     return await get_note(doc_id)
 
 
 @app.put("/api/documents/{doc_id}/note", response_model=NoteResponse)
 async def save_doc_note(doc_id: str, data: NoteBase):
+    doc = await get_document(doc_id)
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found")
     return await save_note(doc_id, data.content)
 
 
