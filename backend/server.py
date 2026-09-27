@@ -13,6 +13,7 @@ from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Query, Reque
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from pathlib import Path, PureWindowsPath
 from pydantic import BaseModel
 
 from database import (
@@ -343,16 +344,33 @@ async def upload_workspace_assets(ws_id: str, files: List[UploadFile] = File(...
     if not ws:
         raise HTTPException(status_code=404, detail="Workspace not found")
         
-    # Prevent directory traversal
-    clean_path = path.strip().strip("/")
-    if ".." in clean_path:
+    # Prevent directory traversal (incl. absolute paths: on Windows
+    # `base / "C:/evil"` discards base and writes to C:/evil, and the
+    # pre-existing ".." substring check misses that entirely).
+    raw_path = (path or "").strip()
+    if raw_path.startswith(("/", "\\")):
         raise HTTPException(status_code=400, detail="Invalid path")
-        
-    target_dir = settings.data_dir / "workspaces" / ws_id / "assets" / clean_path
+    clean_path = raw_path.strip("/")
+    if (
+        ".." in Path(clean_path).parts
+        or ".." in clean_path
+        or clean_path.startswith(("/", "\\"))
+        or Path(clean_path).is_absolute()
+        or PureWindowsPath(clean_path).is_absolute()
+    ):
+        raise HTTPException(status_code=400, detail="Invalid path")
+
+    assets_root = settings.data_dir / "workspaces" / ws_id / "assets"
+    target_dir = assets_root / clean_path
+    try:
+        inside = target_dir.resolve().is_relative_to(assets_root.resolve())
+    except AttributeError:  # Python < 3.9 fallback
+        inside = str(target_dir.resolve()).startswith(str(assets_root.resolve()))
+    if not inside:
+        raise HTTPException(status_code=400, detail="Invalid path")
     target_dir.mkdir(parents=True, exist_ok=True)
     
     import aiofiles
-    from pathlib import Path
     uploaded = []
     for file in files:
         if not file.filename:
