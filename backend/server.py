@@ -656,46 +656,55 @@ async def send_chat_message(chat_id: str, request: ChatSendRequest):
     else:
         persona_style = ""
 
-    if context_docs:
-        per_doc = CHAT_CONTEXT_CHARS // len(context_docs)
-        parts = []
-        for doc in context_docs:
-            if doc.get("doc_type") == "latex":
-                note = await get_note(doc["id"])
-                text = (note.get("content", "") or "")[:per_doc]
-            else:
-                text = (doc.get("extracted_text", "") or "")[:per_doc]
-            label = doc.get("note_title") or doc.get("name") or "Document"
-            parts.append(f"[{label}]\n{text}")
-        context_block = "\n\n---\n\n".join(parts)
-        system_instruction = (
-            f"{persona_prefix}. {persona_style}\n\n"
-            "Answer the user's questions based on the following document context:\n\n"
-            f"{context_block}"
-        ).strip()
-    else:
-        system_instruction = f"{persona_prefix}. {persona_style}\nYou are a helpful AI assistant. Answer the user's questions.".strip()
+    system_instruction = f"{persona_prefix}. {persona_style}\nYou are a helpful AI assistant. Answer the user's questions.".strip()
 
     # Bounded history: most recent N of THIS chat, chronological.
     # get_chat_messages returns the tail in order — no extra slicing.
     history = await get_chat_messages(chat_id, limit=CHAT_HISTORY_LIMIT)
 
-    def _generate():
-        client = genai.Client(api_key=effective_key)
-        contents = []
-        for msg in history:
-            role = "model" if msg["role"] == "assistant" else "user"
-            contents.append({"role": role, "parts": [{"text": msg["content"]}]})
+    # Pre-fetch latex content before threading to avoid async-in-sync issues
+    for doc in context_docs:
+        if doc.get("doc_type") == "latex":
+            note = await get_note(doc["id"])
+            doc["content"] = note.get("content", "")
 
-        response = client.models.generate_content(
-            model=effective_model,
-            contents=contents,
-            config={
-                'system_instruction': system_instruction,
-                'temperature': temp,
-            }
-        )
-        return response.text or ""
+    def _generate():
+        import dspy
+        from retriever import DocumentContextRetriever
+
+        # Initialize the DSPy Language Model (Gemini)
+        # Note: dspy.Gemini wraps google-genai
+        lm = dspy.Gemini(model=effective_model, api_key=effective_key, temperature=temp)
+
+        # Configure retriever with the provided documents
+        rm = DocumentContextRetriever(context_docs=context_docs, k=5)
+
+        class QA(dspy.Signature):
+            """Answer questions based on the conversation history and provided context."""
+            context = dspy.InputField(desc="Relevant document excerpts")
+            history = dspy.InputField(desc="Previous conversation history")
+            question = dspy.InputField()
+            answer = dspy.OutputField(desc="The answer to the question. " + persona_style)
+
+        class ChatRAG(dspy.Module):
+            def __init__(self):
+                super().__init__()
+                self.retrieve = dspy.Retrieve(k=5)
+                self.generate_answer = dspy.Predict(QA)
+
+            def forward(self, question, history):
+                context = self.retrieve(question).passages
+                prediction = self.generate_answer(context=context, history=history, question=question)
+                return dspy.Prediction(context=context, answer=prediction.answer)
+
+        # Format the history as a string
+        history_str = "\n".join([f"{'Assistant' if msg['role'] == 'assistant' else 'User'}: {msg['content']}" for msg in history])
+
+        # Use dspy.context for thread-safe execution in async environments
+        with dspy.context(lm=lm, rm=rm):
+            rag = ChatRAG()
+            prediction = rag(question=request.message, history=history_str)
+            return prediction.answer or ""
 
     try:
         model_reply = await asyncio.wait_for(
@@ -706,7 +715,7 @@ async def send_chat_message(chat_id: str, request: ChatSendRequest):
     except asyncio.TimeoutError:
         model_reply = "Sorry, the model took too long to respond. Please try again."
     except Exception as e:
-        logger.warning("Gemini API error on chat %s: %s", chat_id, e)
+        logger.warning("DSPy/Gemini API error on chat %s: %s", chat_id, e)
         model_reply = f"Sorry, I encountered an error communicating with Gemini API: {e}"
 
     saved_msg = await add_chat_message(chat_id, primary_doc_id, role="assistant", content=model_reply)

@@ -8,6 +8,7 @@ scripts = { rsrch = "main:main" }
 dependencies = [
     "aiofiles>=25.1.0",
     "aiosqlite>=0.22.1",
+    "dspy-ai>=3.4.0",
     "fastapi>=0.141.1",
     "google-genai>=2.23.0",
     "httpx>=0.28.1",
@@ -15,6 +16,7 @@ dependencies = [
     "pymupdf>=1.28.2",
     "python-dotenv>=1.2.3",
     "python-multipart>=0.0.32",
+    "sqlite-utils>=4.2.1",
     "tecto>=0.17.0",
     "uvicorn>=0.52.4",
 ]
