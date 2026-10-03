@@ -10,3 +10,4 @@ python-dotenv>=1.2.3
 python-multipart>=0.0.32
 tecto>=0.17.0
 uvicorn>=0.52.4
+dspy-ai>=3.4.0

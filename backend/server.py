@@ -1,5 +1,6 @@
 import os
 import glob
+import re
 import uuid
 import asyncio
 import time
@@ -40,6 +41,9 @@ from database import (
     get_all_settings,
     get_setting,
     set_settings,
+    search_chunks,
+    get_workspace_documents,
+    _dedupe_pages,
 )
 from config import settings
 from models import (
@@ -63,6 +67,9 @@ from models import (
 from compiler import run_compile, get_build_key, prune_all_builds
 import pymupdf
 from google import genai
+import dspy
+from ai.config import get_dspy_lm
+from ai.modules.paper_qa import GroundedPaperQAModule
 
 logger = logging.getLogger("rsrch.server")
 
@@ -75,6 +82,30 @@ CHAT_HISTORY_LIMIT = settings.chat_history_limit
 CHAT_TIMEOUT_S = settings.chat_timeout_s
 CHAT_RATE_LIMIT = settings.chat_rate_limit
 CHAT_RATE_WINDOW_S = settings.chat_rate_window_s
+# Cap on total context docs per chat send: explicit document_ids (max 3) plus
+# workspace-resolved docs fill the remainder.
+WORKSPACE_CONTEXT_DOCS = 6
+# Hard cap on explicitly attached documents in one send. Mirrors
+# ChatSendRequest.document_ids so the UI can pre-warn instead of 422-ing.
+MAX_ATTACHED_DOCS = 6
+
+# Background fire-and-forget tasks must be strongly referenced: CPython only
+# holds a weak reference to a running task, so an unreferenced task can be
+# garbage-collected mid-execution and silently cancelled.
+_background_tasks: set["asyncio.Task"] = set()
+
+
+def _spawn_background(coro, *, name: str) -> "asyncio.Task":
+    """Run `coro` as a task that cannot be GC'd before it finishes."""
+    task = asyncio.ensure_future(coro)
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+    try:
+        task.set_name(name)
+    except AttributeError:
+        pass
+    return task
+
 
 _genai_client = None
 
@@ -111,6 +142,44 @@ def check_chat_rate_limit(chat_id: str) -> None:
                 q.popleft()
             if not q:
                 del _chat_hits[key]
+
+
+# Matches [p. 3], [p. 3, p. 7], [pp. 10-12], [pp. 10–12] and combinations.
+# Defined once so stripping, parsing and the frontend badge regex stay aligned.
+_CITATION_BODY = (
+    r"\[p{1,2}s?\.\s*\d+(?:\s*[-\u2013]\s*\d+)?"
+    r"(?:\s*,\s*(?:p{1,2}s?\.\s*)?\d+(?:\s*[-\u2013]\s*\d+)?)*\]"
+)
+_PAGE_CITATION_RE = re.compile(_CITATION_BODY)
+# Same marker, but it also swallows the whitespace in front of it so removing a
+# mid-sentence citation doesn't leave "word , word" or a double space.
+_STRIPPABLE_CITATION_RE = re.compile(r"[ \t]*" + _CITATION_BODY)
+
+
+def _strip_page_citations(text: str) -> str:
+    """Remove [p. N] / [p. N, p. M] / [pp. N-M] markers from generated text."""
+    return _STRIPPABLE_CITATION_RE.sub("", text or "")
+
+
+def _extract_page_citations(text: str) -> list[int]:
+    """Backup citation parse: every page number inside any [p. ...] marker.
+
+    Handles the same forms as `_strip_page_citations`, so a model that cites
+    `[pp. 10-12]` still yields clickable badges (10, 11, 12) rather than none.
+    """
+    pages: set[int] = set()
+    for marker in _PAGE_CITATION_RE.finditer(text or ""):
+        for chunk in marker.group().strip("[]").split(","):
+            # Expand "10-12" into 10, 11, 12 so each page is individually clickable.
+            nums = [int(n) for n in re.findall(r"\d+", chunk)]
+            if len(nums) == 2 and re.search(r"\d\s*[-\u2013]\s*\d", chunk):
+                lo, hi = sorted(nums)
+                # Guard against a typo'd huge range.
+                if 0 < lo <= hi <= lo + 500:
+                    pages.update(range(lo, hi + 1))
+                    continue
+            pages.update(nums)
+    return sorted(pages)
 
 
 def _extract_pdf(saved_path: str) -> tuple[str, int]:
@@ -156,7 +225,17 @@ async def lifespan(app: FastAPI):
             )
     except Exception as e:
         logger.warning("Build prune skipped: %s", e)
+
+    # Self-heal the FTS index: PDFs uploaded before chunking existed have no
+    # rows, which silently degrades chat to `extracted_text` truncation.
+    # Runs in the background so boot is never blocked, and is idempotent.
+    _spawn_background(_backfill_chunks(), name="backfill-chunks")
     yield
+    # Let in-flight index tasks finish (or cancel) on shutdown.
+    for task in list(_background_tasks):
+        task.cancel()
+    if _background_tasks:
+        await asyncio.gather(*_background_tasks, return_exceptions=True)
 
 
 app = FastAPI(title="Rsrch API", version="1.0.0", lifespan=lifespan)
@@ -284,6 +363,50 @@ async def upload_document(
         extracted_text=extracted_text,
         doc_type="pdf",
     )
+    
+    async def _index_document_chunks(d_id: str, f_path: str):
+        from chunker import chunk_pdf
+        from database import store_chunks
+        try:
+            chunks = await asyncio.to_thread(chunk_pdf, f_path)
+            await store_chunks(d_id, chunks)
+            logger.info("Indexed %d chunks for %s", len(chunks), d_id)
+        except Exception:
+            # Non-fatal: chat falls back to documents.extracted_text.
+            logger.exception("Failed to index chunks for %s", d_id)
+
+    _spawn_background(
+        _index_document_chunks(doc_id, saved_path),
+        name=f"index-chunks:{doc_id[:8]}",
+    )
+
+    return doc
+
+
+async def _backfill_chunks() -> None:
+    """Chunk PDFs that predate the FTS index (see lifespan)."""
+    from chunker import chunk_pdf
+    from database import get_unindexed_pdf_docs, store_chunks
+
+    try:
+        pending = await get_unindexed_pdf_docs()
+    except Exception:
+        logger.exception("Chunk backfill: could not list unindexed PDFs")
+        return
+    if not pending:
+        return
+    logger.info("Chunk backfill: %d PDF(s) need indexing", len(pending))
+    for row in pending:
+        path = row.get("file_path")
+        if not path or not os.path.exists(path):
+            continue
+        try:
+            chunks = await asyncio.to_thread(chunk_pdf, path)
+            await store_chunks(row["id"], chunks)
+            logger.info("Chunk backfill: indexed %d chunks for %s", len(chunks), row["id"])
+        except Exception:
+            logger.exception("Chunk backfill failed for %s", row["id"])
+    
     return doc
 
 
@@ -609,13 +732,40 @@ async def send_chat_message(chat_id: str, request: ChatSendRequest):
 
     check_chat_rate_limit(chat_id)
 
-    # Resolve context docs (skip missing — chats outlive documents), cap 3.
+    # Resolve context docs (skip missing — chats outlive documents).
+    # Explicit document_ids first (deduped, capped at MAX_ATTACHED_DOCS); then
+    # attached workspaces fill the remainder with their PDF/LaTeX docs up to
+    # WORKSPACE_CONTEXT_DOCS total.
     context_docs = []
-    for doc_id in (request.document_ids or [])[:3]:
+    seen_doc_ids: set = set()
+    for doc_id in (request.document_ids or [])[:MAX_ATTACHED_DOCS]:
+        if doc_id in seen_doc_ids:
+            continue
         doc = await get_document(doc_id)
         if doc:
+            seen_doc_ids.add(doc["id"])
             context_docs.append(doc)
+    for ws_id in (request.workspace_ids or [])[:2]:
+        if len(context_docs) >= WORKSPACE_CONTEXT_DOCS:
+            break
+        try:
+            ws_docs = await get_workspace_documents(ws_id)
+        except Exception as ws_err:
+            logger.warning("Workspace context resolve failed for %s: %s", ws_id, ws_err)
+            continue
+        for ws_doc in ws_docs:
+            if len(context_docs) >= WORKSPACE_CONTEXT_DOCS:
+                break
+            if ws_doc["id"] in seen_doc_ids:
+                continue
+            seen_doc_ids.add(ws_doc["id"])
+            context_docs.append(ws_doc)
     primary_doc_id = context_docs[0]["id"] if context_docs else chat.get("document_id")
+    # Page citations ([p. N]) are only meaningful with PDF context. Rows with
+    # a missing doc_type are legacy PDFs, so they count as PDF context.
+    has_pdf_context = any(
+        (d.get("doc_type") or "pdf") != "latex" for d in context_docs
+    )
 
     await add_chat_message(chat_id, primary_doc_id, role="user", content=request.message)
 
@@ -633,22 +783,24 @@ async def send_chat_message(chat_id: str, request: ChatSendRequest):
         saved_msg = await add_chat_message(chat_id, primary_doc_id, role="assistant", content=fallback_msg)
         return {"message": saved_msg}
 
-    effective_model = (request.model or "").strip() or db_settings.get("gemini_model") or settings.gemini_model
+    effective_model = (request.model or "").strip() or (db_settings.get("gemini_model") or "").strip() or settings.gemini_model
+    if not effective_model or effective_model.strip().lower() == "none":
+        effective_model = settings.gemini_model
     effective_persona = db_settings.get("ai_persona", "academic")
     user_name = db_settings.get("user_name", "Researcher")
     affiliation = db_settings.get("user_affiliation", "")
-
-    try:
-        temp = float(db_settings.get("ai_temperature", 0.7))
-    except (ValueError, TypeError):
-        temp = 0.7
 
     persona_prefix = f"You are assisting {user_name}"
     if affiliation:
         persona_prefix += f" ({affiliation})"
 
     if effective_persona == "academic":
-        persona_style = "Provide rigorous, academically sound explanations with accurate citations and LaTeX math formulas ($...$ or $$...$$) where applicable."
+        persona_style = (
+            "Provide rigorous, academically sound explanations with accurate citations. "
+            "Use LaTeX ONLY for mathematical equations or variables. "
+            "Do NOT wrap regular text, percentages, or plain numbers in math mode ($...$). "
+            "Use standard Markdown for formatting (e.g., **bold**, *italics*)."
+        )
     elif effective_persona == "concise":
         persona_style = "Be direct, concise, and prioritize high-density key points or summaries."
     elif effective_persona == "pedagogical":
@@ -656,60 +808,154 @@ async def send_chat_message(chat_id: str, request: ChatSendRequest):
     else:
         persona_style = ""
 
+    formatted_context = []
     if context_docs:
-        per_doc = CHAT_CONTEXT_CHARS // len(context_docs)
-        parts = []
+        # Even split of the char budget across every context doc.
+        per_doc = max(1, CHAT_CONTEXT_CHARS // len(context_docs))
+        # LaTeX docs: the source IS the context. Label them by file name (which
+        # carries the .tex extension) so the model can talk about "main.tex".
         for doc in context_docs:
             if doc.get("doc_type") == "latex":
                 note = await get_note(doc["id"])
                 text = (note.get("content", "") or "")[:per_doc]
+                label = doc.get("name") or doc.get("note_title") or "document.tex"
+                formatted_context.append(f"[LaTeX source: {label}]: {text}")
+        pdf_docs = [d for d in context_docs if d.get("doc_type") != "latex"]
+        if pdf_docs:
+            pdf_ids = [d["id"] for d in pdf_docs]
+            try:
+                chunk_hits = await search_chunks(pdf_ids, request.message, limit=8)
+            except Exception as search_err:
+                logger.warning("Chunk search failed, using extracted_text fallback: %s", search_err)
+                chunk_hits = []
+            if chunk_hits:
+                per_hit = max(1, CHAT_CONTEXT_CHARS // len(chunk_hits))
+                labels = {d["id"]: (d.get("note_title") or d.get("name") or "Document") for d in pdf_docs}
+                for hit in chunk_hits:
+                    section = hit.get("section") or ""
+                    head = f"[p. {hit.get('page', '?')} | {labels.get(hit.get('document_id'), 'Document')}"
+                    if section:
+                        head += f" | {section}"
+                    head += "]"
+                    formatted_context.append(f"{head}: {(hit.get('text_content') or '')[:per_hit]}")
             else:
-                text = (doc.get("extracted_text", "") or "")[:per_doc]
-            label = doc.get("note_title") or doc.get("name") or "Document"
-            parts.append(f"[{label}]\n{text}")
-        context_block = "\n\n---\n\n".join(parts)
-        system_instruction = (
-            f"{persona_prefix}. {persona_style}\n\n"
-            "Answer the user's questions based on the following document context:\n\n"
-            f"{context_block}"
-        ).strip()
-    else:
-        system_instruction = f"{persona_prefix}. {persona_style}\nYou are a helpful AI assistant. Answer the user's questions.".strip()
+                for doc in pdf_docs:
+                    fallback = (doc.get("extracted_text") or "")[:per_doc]
+                    if fallback.strip():
+                        label = doc.get("note_title") or doc.get("name") or "Document"
+                        formatted_context.append(f"[p. ? | {label}]: {fallback}")
 
     # Bounded history: most recent N of THIS chat, chronological.
-    # get_chat_messages returns the tail in order — no extra slicing.
     history = await get_chat_messages(chat_id, limit=CHAT_HISTORY_LIMIT)
+    formatted_history = [f"{m['role'].capitalize()}: {m['content']}" for m in history]
+
+    dspy_lm = await get_dspy_lm(
+        effective_model, api_key_override=(request.api_key or "").strip() or None
+    )
+    msg_text = request.message.strip()
+
+    # `/fix` must never leak its command prefix into the compiler error log.
+    command = ""
+    if msg_text.startswith("/latex") or msg_text.startswith("/fix"):
+        command, _, remainder = msg_text.partition(" ")
+        instruction = remainder.strip()
+    else:
+        instruction = msg_text
 
     def _generate():
-        client = genai.Client(api_key=effective_key)
-        contents = []
-        for msg in history:
-            role = "model" if msg["role"] == "assistant" else "user"
-            contents.append({"role": role, "parts": [{"text": msg["content"]}]})
-
-        response = client.models.generate_content(
-            model=effective_model,
-            contents=contents,
-            config={
-                'system_instruction': system_instruction,
-                'temperature': temp,
+        # One thread owns the DSPy context: no nested thread hops inside.
+        with dspy.context(lm=dspy_lm):
+            if command == "/latex":
+                from ai.modules.latex_copilot import SafeLatexModule
+                latex_result = SafeLatexModule().forward(
+                    context=list(formatted_context),
+                    instruction=instruction,
+                )
+                latex_code = _strip_page_citations(latex_result.latex_code or "")
+                return {
+                    "answer": f"Here is the generated LaTeX:\n\n```latex\n{latex_code}\n```",
+                    "cited_pages": [],
+                    "code_patch": latex_code,
+                    "action_type": "latex_patch",
+                }
+            if command == "/fix":
+                from ai.modules.diagnostics import FixTectonicErrorModule
+                fix_result = FixTectonicErrorModule().forward(
+                    error_log=instruction,
+                    latex_context="\n".join(formatted_context),
+                )
+                fixed_code = _strip_page_citations(fix_result.corrected_code or "")
+                fix_expl = (fix_result.explanation or "").strip()
+                if not has_pdf_context:
+                    fix_expl = _strip_page_citations(fix_expl)
+                return {
+                    "answer": f"{fix_expl}\n\n```latex\n{fixed_code}\n```",
+                    "cited_pages": [],
+                    "code_patch": fixed_code,
+                    "action_type": "latex_patch",
+                }
+            # Retrieval already ran in this request; document_ids=[] disables
+            # in-module retrieval so no thread/event-loop bridging happens here.
+            qa_result = GroundedPaperQAModule(document_ids=[]).forward(
+                system=f"{persona_prefix}. {persona_style}".strip(". "),
+                context=list(formatted_context),
+                chat_history=formatted_history,
+                question=msg_text,
+            )
+            answer_text = (getattr(qa_result, "answer", "") or "").strip()
+            if not has_pdf_context:
+                answer_text = _strip_page_citations(answer_text)
+                cited_pages: list[int] = []
+            else:
+                cited_pages = _dedupe_pages(getattr(qa_result, "cited_pages", None) or [])
+                if not cited_pages:
+                    cited_pages = _extract_page_citations(answer_text)
+            return {
+                "answer": answer_text,
+                "cited_pages": cited_pages,
+                "code_patch": None,
+                "action_type": None,
             }
-        )
-        return response.text or ""
 
     try:
-        model_reply = await asyncio.wait_for(
+        generated = await asyncio.wait_for(
             asyncio.to_thread(_generate), timeout=CHAT_TIMEOUT_S
         )
-        if not model_reply.strip():
-            model_reply = "Sorry, I received an empty response from the model."
     except asyncio.TimeoutError:
-        model_reply = "Sorry, the model took too long to respond. Please try again."
+        generated = {
+            "answer": "Sorry, the model took too long to respond. Please try again.",
+            "cited_pages": [],
+            "code_patch": None,
+            "action_type": None,
+        }
     except Exception as e:
         logger.warning("Gemini API error on chat %s: %s", chat_id, e)
-        model_reply = f"Sorry, I encountered an error communicating with Gemini API: {e}"
+        generated = {
+            "answer": f"Sorry, I encountered an error communicating with Gemini API: {e}",
+            "cited_pages": [],
+            "code_patch": None,
+            "action_type": None,
+        }
 
-    saved_msg = await add_chat_message(chat_id, primary_doc_id, role="assistant", content=model_reply)
+    model_reply = (generated.get("answer") or "").strip()
+    if not model_reply:
+        model_reply = "Sorry, I received an empty response from the model."
+
+    cited_pages = _dedupe_pages(generated.get("cited_pages") or [])
+    # `cited_pages` is persisted on the row; `code_patch`/`action_type` stay
+    # response-only (transient — the UI acts on them once, then they're gone).
+    saved_msg = await add_chat_message(
+        chat_id,
+        primary_doc_id,
+        role="assistant",
+        content=model_reply,
+        cited_pages=cited_pages,
+    )
+    saved_msg["cited_pages"] = cited_pages
+    if generated.get("code_patch"):
+        saved_msg["code_patch"] = generated["code_patch"]
+    if generated.get("action_type"):
+        saved_msg["action_type"] = generated["action_type"]
 
     # Auto-title untitled chats from the first user message.
     if not (chat.get("title") or "").strip() or chat.get("title") == "New chat":

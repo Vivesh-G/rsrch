@@ -4,9 +4,12 @@ import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
 import rehypeKatex from 'rehype-katex';
 import 'katex/dist/katex.min.css';
-import type { ChatMessage, ChatSession } from '../types';
-import { api } from '../services/api';
+import type { ChatMessage, ChatSession, DocumentItem } from '../types';
+import { api, ApiError } from '../services/api';
 import { IconPlus, IconClose, IconTrash, IconDoc } from './Icons';
+
+/** Mirrors MAX_ATTACHED_DOCS in backend/server.py. */
+const MAX_ATTACHED_DOCS = 6;
 
 interface ChatPanelProps {
   /** Currently open document (for context attach) — panel is NOT keyed by it. */
@@ -14,6 +17,13 @@ interface ChatPanelProps {
   activeDocTitle: string;
   /** Title lookup for docs attached to a chat (may be deleted → null). */
   resolveDocTitle: (id: string) => string | null;
+  /** PDF/TeX docs in the active workspace — polled when the picker opens. */
+  listContextDocs: () => DocumentItem[];
+  activeWorkspaceId: string | null;
+  activeWorkspaceName: string | null;
+  /** Queued 'rsrch:chat-send' message from outside the panel (App opens chat). */
+  pendingSend?: string | null;
+  onPendingSendConsumed?: () => void;
   style?: React.CSSProperties;
   dragHandle?: React.ReactNode;
   onClose?: () => void;
@@ -45,6 +55,66 @@ const fmtWhen = (ts: number) =>
     minute: '2-digit',
   });
 
+/**
+ * Citation marker forms the backend understands: [p. 3], [p. 3, p. 7],
+ * [pp. 10-12], [pp. 10–12]. Must stay in sync with _PAGE_CITATION_RE in
+ * backend/server.py — otherwise markers render as raw text.
+ */
+const CITATION_MARKER_RE = /\[p{1,2}s?\.\s*\d+(?:\s*[-\u2013]\s*\d+)?(?:\s*,\s*(?:p{1,2}s?\.\s*)?\d+(?:\s*[-\u2013]\s*\d+)?)*\]/g;
+
+/** Pages referenced by one marker, expanding ranges like `10-12`. */
+function pagesFromMarker(marker: string): number[] {
+    const pages = new Set<number>();
+    for (const part of marker.replace(/[[\]]/g, '').split(',')) {
+        const nums = part.match(/\d+/g)?.map(Number) ?? [];
+        if (nums.length === 2 && /-\s*\d/.test(part)) {
+            const [lo, hi] = nums[0] <= nums[1] ? nums : [nums[1], nums[0]];
+            if (lo >= 1 && hi - lo <= 500) {
+                for (let p = lo; p <= hi; p++) pages.add(p);
+                continue;
+            }
+        }
+        nums.forEach((p) => pages.add(p));
+    }
+    return [...pages].filter((p) => p >= 1).sort((a, b) => a - b);
+}
+
+const scrollToPage = (page: number) => {
+    window.dispatchEvent(new CustomEvent('rsrch:scroll-to-page', { detail: { page } }));
+};
+
+/** Replace `[p. N]` markers in rendered markdown text with clickable badges. */
+function transformCitations(children: React.ReactNode): React.ReactNode {
+    return React.Children.map(children, (child) => {
+        if (typeof child !== 'string' || !CITATION_MARKER_RE.test(child)) return child;
+        // Regex is global — reset lastIndex before reusing it.
+        CITATION_MARKER_RE.lastIndex = 0;
+        const out: React.ReactNode[] = [];
+        let cursor = 0;
+        for (const match of child.matchAll(CITATION_MARKER_RE)) {
+            const start = match.index ?? 0;
+            if (start > cursor) out.push(child.slice(cursor, start));
+            for (const page of pagesFromMarker(match[0])) {
+                out.push(
+                    <button key={`cite-${start}-${page}`} className="citation-badge"
+                        onClick={() => scrollToPage(page)}
+                        title={`Scroll to page ${page}`}
+                        type="button"
+                    >
+                        p. {page}
+                    </button>,
+                );
+            }
+            cursor = start + match[0].length;
+        }
+        if (cursor < child.length) out.push(child.slice(cursor));
+        // Keys on every element: React warns on unkeyed array children.
+        return out.map((node, i) =>
+            typeof node === 'string' ? <React.Fragment key={`txt-${i}`}>{node}</React.Fragment> : node,
+        );
+    });
+}
+
 const MemoizedMessageList = React.memo(({ messages, isWaiting }: { messages: ChatMessage[], isWaiting: boolean }) => (
   <>
     {messages.length === 0 && (
@@ -60,14 +130,12 @@ const MemoizedMessageList = React.memo(({ messages, isWaiting }: { messages: Cha
               remarkPlugins={[remarkGfm, remarkMath]}
               rehypePlugins={[rehypeKatex]}
               components={{
+                p: ({children}) => <p>{transformCitations(children)}</p>,
+                li: ({children}) => <li>{transformCitations(children)}</li>,
                 code({ node, className, children, ...props }: any) {
                   const match = /language-(\w+)/.exec(className || '');
                   const lang = match?.[1]?.toLowerCase();
                   const isLatex = lang === 'latex' || lang === 'tex';
-                  // react-markdown v10 no longer passes `inline`: a fenced
-                  // block arrives as pre > code with a language- class, while
-                  // inline `code` has no language. Language check alone is
-                  // sufficient and version-proof.
                   if (isLatex) {
                     const flatten = (n: React.ReactNode): string =>
                       Array.isArray(n)
@@ -80,14 +148,38 @@ const MemoizedMessageList = React.memo(({ messages, isWaiting }: { messages: Cha
                       <div className="ai-code-block" style={{ position: 'relative', marginTop: 8, marginBottom: 8 }}>
                         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: 'var(--surface-subtle)', padding: '4px 8px', borderTopLeftRadius: 4, borderTopRightRadius: 4, fontSize: 12 }}>
                           <span style={{ color: 'var(--text-tertiary)' }}>LaTeX</span>
-                          <button 
-                            className="pdf-popup-btn primary" 
-                            style={{ height: 22, padding: '0 8px', fontSize: 11 }}
-                            onClick={() => window.dispatchEvent(new CustomEvent('rsrch:latex-apply', { detail: { code } }))}
-                            type="button"
-                          >
-                            ✨ Replace Selection
-                          </button>
+                          <div style={{ display: 'flex', gap: '6px' }}>
+                            <button 
+                              className="pdf-popup-btn" 
+                              style={{ height: 22, padding: '0 8px', fontSize: 11 }}
+                              onClick={() => {
+                                navigator.clipboard.writeText(code);
+                                // Optional: simple toast or visual feedback could be added here
+                              }}
+                              title="Copy to clipboard"
+                              type="button"
+                            >
+                              Copy
+                            </button>
+                            <button 
+                              className="pdf-popup-btn" 
+                              style={{ height: 22, padding: '0 8px', fontSize: 11 }}
+                              onClick={() => window.dispatchEvent(new CustomEvent('rsrch:latex-insert', { detail: { code } }))}
+                              title="Insert at caret position"
+                              type="button"
+                            >
+                              Insert
+                            </button>
+                            <button 
+                              className="pdf-popup-btn primary" 
+                              style={{ height: 22, padding: '0 8px', fontSize: 11 }}
+                              onClick={() => window.dispatchEvent(new CustomEvent('rsrch:latex-apply', { detail: { code } }))}
+                              title="Replace currently selected text"
+                              type="button"
+                            >
+                              ✨ Replace Selection
+                            </button>
+                          </div>
                         </div>
                         <pre style={{ margin: 0, borderTopLeftRadius: 0, borderTopRightRadius: 0, padding: '12px' }}>
                           <code className={className} {...props}>
@@ -103,6 +195,30 @@ const MemoizedMessageList = React.memo(({ messages, isWaiting }: { messages: Cha
             >
               {msg.content}
             </ReactMarkdown>
+            {(() => {
+                // Pages already rendered as inline badges must not be repeated
+                // in the summary chip row.
+                const inline = new Set<number>();
+                for (const m of msg.content.matchAll(CITATION_MARKER_RE)) {
+                    pagesFromMarker(m[0]).forEach((p) => inline.add(p));
+                }
+                CITATION_MARKER_RE.lastIndex = 0;
+                const extra = (msg.cited_pages ?? []).filter((p) => !inline.has(p));
+                if (extra.length === 0) return null;
+                return (
+                  <div className="citation-list" style={{ marginTop: '8px', display: 'flex', gap: '4px', flexWrap: 'wrap' }}>
+                    {extra.map((page) => (
+                      <button key={page} className="citation-badge"
+                          onClick={() => scrollToPage(page)}
+                          title={`Scroll to page ${page}`}
+                          type="button"
+                      >
+                        p. {page}
+                      </button>
+                    ))}
+                  </div>
+                );
+            })()}
           </div>
         ) : (
           <div className="chat-content">{msg.content}</div>
@@ -121,7 +237,7 @@ const MemoizedMessageList = React.memo(({ messages, isWaiting }: { messages: Cha
 // draft (it unmounts on close, so state resets naturally); past chats open
 // via the History view. Context = explicit attach chips, so a chat started
 // on one PDF keeps working when continued on another.
-const ChatPanelInner = ({ activeDocId, activeDocTitle, resolveDocTitle, style, dragHandle, onClose }: ChatPanelProps) => {
+const ChatPanelInner = ({ activeDocId, activeDocTitle, resolveDocTitle, listContextDocs, activeWorkspaceId, activeWorkspaceName, pendingSend, onPendingSendConsumed, style, dragHandle, onClose }: ChatPanelProps) => {
   const [view, setView] = useState<'chat' | 'history'>('chat');
   const [chats, setChats] = useState<ChatSession[]>([]);
   const [activeChatId, setActiveChatId] = useState<string | null>(null);
@@ -131,6 +247,10 @@ const ChatPanelInner = ({ activeDocId, activeDocTitle, resolveDocTitle, style, d
   const [attachedIds, setAttachedIds] = useState<string[]>(() =>
     activeDocId ? [activeDocId] : []
   );
+  const [attachedWs, setAttachedWs] = useState<{ id: string; name: string }[]>([]);
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const [pickerQuery, setPickerQuery] = useState('');
+  const pickerRef = useRef<HTMLDivElement>(null);
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const scrollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -146,14 +266,31 @@ const ChatPanelInner = ({ activeDocId, activeDocTitle, resolveDocTitle, style, d
   }, []);
 
   useEffect(() => {
+    if (!pickerOpen) return;
+    const onDown = (e: MouseEvent) => {
+      if (pickerRef.current && !pickerRef.current.contains(e.target as Node)) {
+        setPickerOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', onDown);
+    return () => document.removeEventListener('mousedown', onDown);
+  }, [pickerOpen]);
+
+  useEffect(() => {
     const handleAppend = (e: Event) => {
       const detail = (e as CustomEvent).detail;
       if (detail && detail.text) {
         setInput((prev) => prev ? prev + '\n\n' + detail.text : detail.text);
       }
     };
+    
+    // We can't call sendMessage directly here since it's defined below,
+    // so we set the input and trigger a custom submit event or just define it in a way we can reach it.
+    // Instead of doing it here, we'll do it via a flag or just handle it below.
     window.addEventListener('rsrch:chat-append', handleAppend);
-    return () => window.removeEventListener('rsrch:chat-append', handleAppend);
+    return () => {
+      window.removeEventListener('rsrch:chat-append', handleAppend);
+    };
   }, []);
 
   const refreshChats = useCallback(async (): Promise<ChatSession[]> => {
@@ -214,6 +351,8 @@ const ChatPanelInner = ({ activeDocId, activeDocTitle, resolveDocTitle, style, d
         if (m.document_id && !fromMsgs.includes(m.document_id)) fromMsgs.push(m.document_id);
       }
       setAttachedIds(fromMsgs.length > 0 ? fromMsgs : chat.document_id ? [chat.document_id] : []);
+      setAttachedWs([]);
+      setPickerOpen(false);
       scrollToBottom();
     } catch (err) {
       console.warn('Failed to fetch chat messages:', err);
@@ -238,6 +377,8 @@ const ChatPanelInner = ({ activeDocId, activeDocTitle, resolveDocTitle, style, d
     setInput('');
     setView('chat');
     setConfirmDeleteId(null);
+    setAttachedWs([]);
+    setPickerOpen(false);
   }, []);
 
   const attachCurrent = useCallback(() => {
@@ -264,15 +405,17 @@ const ChatPanelInner = ({ activeDocId, activeDocTitle, resolveDocTitle, style, d
       setActiveChatId(null);
       setMessages([]);
       setAttachedIds([]);
+      setAttachedWs([]);
     }
     void refreshChats();
   }, [confirmDeleteId, refreshChats]);
 
-  const handleSend = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!input.trim() || isWaiting) return;
+  const handleSend = async (e?: React.FormEvent, overrideText?: string) => {
+    if (e) e.preventDefault();
+    const textToSend = overrideText !== undefined ? overrideText : input;
+    if (!textToSend.trim() || isWaiting) return;
 
-    const text = input.trim().slice(0, 4000);
+    const text = textToSend.trim().slice(0, 4000);
     const userMessage: ChatMessage = {
       role: 'user',
       content: text,
@@ -280,7 +423,11 @@ const ChatPanelInner = ({ activeDocId, activeDocTitle, resolveDocTitle, style, d
     };
 
     setMessages((prev) => [...prev, userMessage]);
-    setInput('');
+    // Only clear the composer when the send originated from it — a queued
+    // quick-action/external send must not wipe what the user was typing.
+    if (overrideText === undefined) {
+      setInput('');
+    }
     setIsWaiting(true);
     scrollToBottom();
 
@@ -291,18 +438,29 @@ const ChatPanelInner = ({ activeDocId, activeDocTitle, resolveDocTitle, style, d
         chatId = created.id;
         setActiveChatId(chatId);
       }
-      const responseMsg = await api.sendChatMessage(chatId, text, attachedIds);
+      // Slice to the backend cap so the picker can never build a request the
+      // API rejects with 422 (MAX_ATTACHED_DOCS on the server).
+      const responseMsg = await api.sendChatMessage(
+        chatId,
+        text,
+        attachedIds.slice(0, MAX_ATTACHED_DOCS),
+        attachedWs.map((w) => w.id),
+      );
       if (activeChatIdRef.current !== chatId) return; // user moved on
       setMessages((prev) => [...prev, responseMsg]);
+      // A latex_patch is surfaced in-thread with Insert/Copy/Replace buttons.
+      // It is NOT auto-applied: silently rewriting the user's selection (or
+      // their whole document, when the selection is empty) is destructive.
     } catch (err) {
       console.error('Chat error:', err);
-      // Surface failures in-thread (C7): the optimistic user bubble would
+      const detail = err instanceof ApiError ? ` (${err.status})` : '';
+      // Surface failures in-thread: the optimistic user bubble would
       // otherwise hang with no reply and no retry affordance.
       setMessages((prev) => [
         ...prev,
         {
           role: 'assistant',
-          content: 'Send failed — please check your connection and try again.',
+          content: `Send failed${detail} — please check your connection and try again.`,
           created_at: Date.now() / 1000,
         },
       ]);
@@ -313,8 +471,43 @@ const ChatPanelInner = ({ activeDocId, activeDocTitle, resolveDocTitle, style, d
     }
   };
 
+  // Fire a message queued by App (editor "Fix with AI"). App captures
+  // 'rsrch:chat-send' globally so the panel works even when it starts closed.
+  useEffect(() => {
+    if (!pendingSend || !pendingSend.trim()) return;
+    onPendingSendConsumed?.();
+    void handleSend(undefined, pendingSend);
+    // Intentionally keyed on the value only: re-running on unrelated state
+    // changes would re-send the same queued message.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pendingSend]);
+
   const activeChat = chats.find((c) => c.id === activeChatId) ?? null;
   const headerTitle = activeChat ? activeChat.title : 'New chat';
+
+  // Context picker list: current workspace PDF/TeX docs, minus attached, filtered.
+  const pickerFilter = pickerQuery.trim().toLowerCase();
+  const pickerDocs = (pickerOpen ? listContextDocs() : []).filter(
+    (d) =>
+      !attachedIds.includes(d.id) &&
+      (!pickerFilter || (d.note_title || d.name).toLowerCase().includes(pickerFilter))
+  );
+  const wsAlreadyAttached = !activeWorkspaceId || attachedWs.some((w) => w.id === activeWorkspaceId);
+  // Hard cap so the picker can never build a request the API 422s on.
+  const attachedCount = attachedIds.length;
+  const attachFull = attachedCount >= MAX_ATTACHED_DOCS;
+
+  const attachDoc = (docId: string) => {
+    setAttachedIds((prev) =>
+      prev.includes(docId) || prev.length >= MAX_ATTACHED_DOCS ? prev : [...prev, docId],
+    );
+  };
+
+  // Whether any LaTeX doc is in play, so the quick-action chips match the
+  // active context. Must use doc_type — titles don't carry the extension.
+  const hasLatexContext =
+    (activeDocId ? listContextDocs().find((d) => d.id === activeDocId)?.doc_type === 'latex' : false) ||
+    attachedIds.some((id) => listContextDocs().find((d) => d.id === id)?.doc_type === 'latex');
 
   return (
     <aside className="chat-panel" id="chatPanel" style={style}>
@@ -394,34 +587,140 @@ const ChatPanelInner = ({ activeDocId, activeDocTitle, resolveDocTitle, style, d
               <MemoizedMessageList messages={messages} isWaiting={isWaiting} />
               <div ref={messagesEndRef} />
             </div>
-            {(attachedIds.length > 0 || activeDocId) && (
-              <div className="chat-context-row">
-                {attachedIds.map((id) => (
-                  <span key={id} className="chat-context-chip" title={resolveDocTitle(id) ?? 'Deleted document'}>
-                    <IconDoc size={11} />
-                    <span>{resolveDocTitle(id) ?? 'Deleted document'}</span>
-                    <button className="chip-x" onClick={() => detach(id)} title="Remove context" type="button">
-                      <IconClose size={9} />
-                    </button>
-                  </span>
-                ))}
-                {activeDocId && !attachedIds.includes(activeDocId) && (
-                  <button className="linkish" onClick={attachCurrent} title={`Attach "${activeDocTitle}" as context`} type="button">
-                    + {activeDocTitle.length > 24 ? activeDocTitle.slice(0, 24) + '…' : activeDocTitle}
+            <div className="chat-context-row">
+              {attachedIds.map((id) => (
+                <span key={id} className="chat-context-chip" title={resolveDocTitle(id) ?? 'Deleted document'}>
+                  <IconDoc size={11} />
+                  <span>{resolveDocTitle(id) ?? 'Deleted document'}</span>
+                  <button className="chip-x" onClick={() => detach(id)} title="Remove context" type="button">
+                    <IconClose size={9} />
                   </button>
+                </span>
+              ))}
+              {attachedWs.map((w) => (
+                <span key={`ws-${w.id}`} className="chat-context-chip ws-chip" title={`Search all PDFs in ${w.name}`}>
+                  <span>≡ {w.name}</span>
+                  <button className="chip-x" onClick={() => setAttachedWs((prev) => prev.filter((x) => x.id !== w.id))} title="Remove workspace context" type="button">
+                    <IconClose size={9} />
+                  </button>
+                </span>
+              ))}
+              {activeDocId && !attachedIds.includes(activeDocId) && (
+                <button className="linkish" onClick={attachCurrent} title={`Attach "${activeDocTitle}" as context`} type="button">
+                  + {activeDocTitle.length > 24 ? activeDocTitle.slice(0, 24) + '…' : activeDocTitle}
+                </button>
+              )}
+              <div className="context-picker-wrap" ref={pickerRef}>
+                <button className="linkish" onClick={() => { setPickerQuery(''); setPickerOpen((o) => !o); }} title="Attach a PDF or LaTeX file without opening it" type="button">
+                  + Add Context
+                </button>
+                {pickerOpen && (
+                  <div className="context-picker">
+                    {activeWorkspaceName && !wsAlreadyAttached && (
+                      <button
+                        className="context-picker-item ws-add"
+                        onClick={() => {
+                          if (activeWorkspaceId) {
+                            setAttachedWs((prev) =>
+                              prev.some((w) => w.id === activeWorkspaceId)
+                                ? prev
+                                : [...prev, { id: activeWorkspaceId, name: activeWorkspaceName ?? 'Workspace' }]
+                            );
+                          }
+                          setPickerOpen(false);
+                        }}
+                        title={`Search over all PDFs in ${activeWorkspaceName}`}
+                        type="button"
+                      >
+                        <span>≡ Add workspace: {activeWorkspaceName}</span>
+                      </button>
+                    )}
+                    <input
+                      className="context-picker-search"
+                      placeholder="Filter documents..."
+                      aria-label="Filter documents"
+                      value={pickerQuery}
+                      onChange={(e) => setPickerQuery(e.target.value)}
+                    />
+                    {attachFull ? (
+                      <div className="context-picker-empty">
+                        Context limit reached ({attachedCount}/{MAX_ATTACHED_DOCS}). Remove a document to add another.
+                      </div>
+                    ) : pickerDocs.length === 0 ? (
+                      <div className="context-picker-empty">No other PDFs in this workspace.</div>
+                    ) : (
+                      pickerDocs.map((d) => (
+                        <button
+                          key={d.id}
+                          className="context-picker-item"
+                          onClick={() => { attachDoc(d.id); setPickerOpen(false); }}
+                          title={`Attach "${d.note_title || d.name}" as context`}
+                          type="button"
+                        >
+                          <IconDoc size={11} />
+                          <span>{d.note_title || d.name}</span>
+                        </button>
+                      ))
+                    )}
+                  </div>
                 )}
               </div>
-            )}
-            <form className="chat-input-form" onSubmit={handleSend}>
-              <input
-                type="text"
+            </div>
+            
+            <div className="chat-quick-actions" style={{ padding: '0 16px 8px', display: 'flex', gap: '8px', overflowX: 'auto', flexShrink: 0 }}>
+              {/* Chips prefill the composer so the prompt stays editable.
+                  Bare prompts like "Summarize this document." strip down to a
+                  single stopword-ish term after FTS stopword removal, which
+                  retrieves arbitrary chunks. */}
+              {hasLatexContext ? (
+                <>
+                  <button type="button" className="quick-action-chip" onClick={() => setInput('/latex write a methodology section')}>
+                    Methodology
+                  </button>
+                  <button type="button" className="quick-action-chip" onClick={() => setInput('/latex insert a figure for the architecture')}>
+                    Figure
+                  </button>
+                  <button type="button" className="quick-action-chip" onClick={() => setInput('/latex add an equation for cross-entropy loss')}>
+                    Equation
+                  </button>
+                </>
+              ) : (
+                <>
+                  <button type="button" className="quick-action-chip" onClick={() => setInput('Summarize this document, citing the pages you used:')}>
+                    Summarize
+                  </button>
+                  <button type="button" className="quick-action-chip" onClick={() => setInput('What is the main contribution of this work, and what problem does it solve?')}>
+                    Main Contribution
+                  </button>
+                  <button type="button" className="quick-action-chip" onClick={() => setInput('Explain the methodology in detail:')}>
+                    Methodology
+                  </button>
+                </>
+              )}
+            </div>
+
+            <form className="chat-input-form" onSubmit={(e) => handleSend(e)}>
+              <textarea
                 className="chat-input"
-                placeholder={attachedIds.length > 0 ? 'Ask about the attached PDFs...' : 'Ask anything...'}
+                placeholder={attachedIds.length > 0 || attachedWs.length > 0 ? 'Ask about the attached context...' : 'Ask anything...'}
                 aria-label="Chat message"
                 value={input}
-                onChange={(e) => setInput(e.target.value.slice(0, 4000))}
+                onChange={(e) => {
+                  setInput(e.target.value.slice(0, 4000));
+                  e.target.style.height = 'auto';
+                  e.target.style.height = `${Math.min(e.target.scrollHeight, 150)}px`;
+                }}
+                onKeyDown={(e) => {
+                  // Enter sends; Shift+Enter inserts a newline.
+                  if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
+                    e.preventDefault();
+                    void handleSend();
+                  }
+                }}
+                rows={1}
                 maxLength={4000}
                 disabled={isWaiting}
+                style={{ resize: 'none', overflowY: 'auto' }}
               />
               <button type="submit" className="chat-send-btn pill-btn" disabled={!input.trim() || isWaiting}>
                 Send
@@ -441,6 +740,11 @@ export const ChatPanel = React.memo(
       prev.activeDocId === next.activeDocId &&
       prev.activeDocTitle === next.activeDocTitle &&
       prev.resolveDocTitle === next.resolveDocTitle &&
+      prev.listContextDocs === next.listContextDocs &&
+      prev.activeWorkspaceId === next.activeWorkspaceId &&
+      prev.activeWorkspaceName === next.activeWorkspaceName &&
+      prev.pendingSend === next.pendingSend &&
+      prev.onPendingSendConsumed === next.onPendingSendConsumed &&
       prev.style === next.style &&
       prev.onClose === next.onClose &&
       prev.dragHandle === next.dragHandle

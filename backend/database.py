@@ -1,7 +1,8 @@
+import json
 import os
 import time
 import uuid
-from typing import List, Optional, Dict, Any
+from typing import Iterable, List, Optional, Dict, Any
 from contextlib import asynccontextmanager
 import aiosqlite
 
@@ -103,6 +104,46 @@ async def init_db():
                 updated_at REAL NOT NULL
             );
         """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS document_chunks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                document_id TEXT NOT NULL,
+                page INTEGER NOT NULL,
+                section TEXT,
+                text_content TEXT NOT NULL,
+                FOREIGN KEY(document_id) REFERENCES documents(id) ON DELETE CASCADE
+            );
+        """)
+        await db.execute("""
+            CREATE VIRTUAL TABLE IF NOT EXISTS document_chunks_fts USING fts5(
+                document_id UNINDEXED,
+                page UNINDEXED,
+                section,
+                text_content,
+                content='document_chunks',
+                content_rowid='id'
+            );
+        """)
+        await db.execute("""
+            CREATE TRIGGER IF NOT EXISTS document_chunks_ai AFTER INSERT ON document_chunks BEGIN
+              INSERT INTO document_chunks_fts(rowid, document_id, page, section, text_content) 
+              VALUES (new.id, new.document_id, new.page, new.section, new.text_content);
+            END;
+        """)
+        await db.execute("""
+            CREATE TRIGGER IF NOT EXISTS document_chunks_ad AFTER DELETE ON document_chunks BEGIN
+              INSERT INTO document_chunks_fts(document_chunks_fts, rowid, document_id, page, section, text_content) 
+              VALUES('delete', old.id, old.document_id, old.page, old.section, old.text_content);
+            END;
+        """)
+        await db.execute("""
+            CREATE TRIGGER IF NOT EXISTS document_chunks_au AFTER UPDATE ON document_chunks BEGIN
+              INSERT INTO document_chunks_fts(document_chunks_fts, rowid, document_id, page, section, text_content) 
+              VALUES('delete', old.id, old.document_id, old.page, old.section, old.text_content);
+              INSERT INTO document_chunks_fts(rowid, document_id, page, section, text_content) 
+              VALUES (new.id, new.document_id, new.page, new.section, new.text_content);
+            END;
+        """)
         # Indexes for the hot paths: workspace doc lists, chat history,
         # and the LIKE search across document fields.
         await db.execute(
@@ -115,6 +156,14 @@ async def init_db():
             "CREATE INDEX IF NOT EXISTS idx_documents_name ON documents(name)"
         )
         await _ensure_chat_schema(db)
+        # AI citation pages (JSON array text) persist with the message so
+        # reloading chat history keeps the page badges. Response-only data
+        # used to vanish on reload; see Context.md §7.6.
+        cursor = await db.execute("PRAGMA table_info(chat_messages)")
+        if "cited_pages" not in {r["name"] for r in await cursor.fetchall()}:
+            await db.execute(
+                "ALTER TABLE chat_messages ADD COLUMN cited_pages TEXT DEFAULT '[]'"
+            )
         await db.commit()
 
         # Seed default workspace if empty
@@ -281,6 +330,19 @@ async def get_document(doc_id: str) -> Optional[Dict[str, Any]]:
         return _doc_row_to_doc(row) if row else None
 
 
+async def get_workspace_documents(workspace_id: str) -> List[Dict[str, Any]]:
+    """PDF/LaTeX docs in a workspace, oldest-first — full rows for chat context."""
+    async with get_db() as db:
+        cursor = await db.execute(
+            """SELECT * FROM documents
+               WHERE workspace_id = ?
+                 AND (doc_type IS NULL OR doc_type IN ('pdf', 'latex'))
+               ORDER BY added_at ASC""",
+            (workspace_id,),
+        )
+        return [_doc_row_to_doc(r) for r in await cursor.fetchall()]
+
+
 async def update_document(
     doc_id: str,
     note_title: Optional[str] = None,
@@ -423,7 +485,8 @@ async def _ensure_chat_schema(db) -> None:
                 document_id TEXT,
                 role TEXT NOT NULL,
                 content TEXT NOT NULL,
-                created_at REAL NOT NULL
+                created_at REAL NOT NULL,
+                cited_pages TEXT DEFAULT '[]'
             );
         """)
         select_chat = "chat_id" if has_chat_id else "NULL AS chat_id"
@@ -551,19 +614,56 @@ async def get_chat_messages(chat_id: str, limit: int = 200) -> List[Dict[str, An
             "SELECT * FROM chat_messages WHERE chat_id = ? ORDER BY created_at DESC, id DESC LIMIT ?",
             (chat_id, limit),
         )
-        rows = [dict(r) for r in await cursor.fetchall()]
+        rows = [_chat_msg_row_to_msg(r) for r in await cursor.fetchall()]
         rows.reverse()
         return rows
 
 
+def _decode_cited_pages(raw: Any) -> List[int]:
+    """Parse the `cited_pages` JSON column into a sorted unique int list."""
+    if not raw:
+        return []
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, ValueError):
+        return []
+    if not isinstance(parsed, list):
+        return []
+    out = set()
+    for p in parsed:
+        try:
+            out.add(int(p))
+        except (TypeError, ValueError):
+            continue
+    return sorted(out)
+
+
+def _chat_msg_row_to_msg(row) -> Dict[str, Any]:
+    msg = dict(row)
+    msg["cited_pages"] = _decode_cited_pages(msg.pop("cited_pages", None))
+    return msg
+
+
 async def add_chat_message(
-    chat_id: str, document_id: Optional[str], role: str, content: str
+    chat_id: str,
+    document_id: Optional[str],
+    role: str,
+    content: str,
+    cited_pages: Optional[List[int]] = None,
 ) -> Dict[str, Any]:
     now = time.time()
     async with get_db() as db:
         cursor = await db.execute(
-            "INSERT INTO chat_messages (chat_id, document_id, role, content, created_at) VALUES (?, ?, ?, ?, ?) RETURNING *",
-            (chat_id, document_id, role, content, now),
+            "INSERT INTO chat_messages (chat_id, document_id, role, content, created_at, cited_pages) "
+            "VALUES (?, ?, ?, ?, ?, ?) RETURNING *",
+            (
+                chat_id,
+                document_id,
+                role,
+                content,
+                now,
+                json.dumps(_dedupe_pages(cited_pages)),
+            ),
         )
         row = await cursor.fetchone()
         if row is None:
@@ -572,7 +672,7 @@ async def add_chat_message(
             "UPDATE chats SET updated_at = ? WHERE id = ?", (now, chat_id)
         )
         await db.commit()
-        return dict(row)
+        return _chat_msg_row_to_msg(row)
 
 
 async def _ensure_settings_table(db: aiosqlite.Connection) -> None:
@@ -617,4 +717,102 @@ async def set_settings(entries: Dict[str, Any]) -> None:
                     (k, str(v), now),
                 )
         await db.commit()
+
+# Chunking Operations
+def _dedupe_pages(pages: Optional[Iterable[Any]]) -> List[int]:
+    """Coerce an iterable of page numbers to a sorted unique int list."""
+    out = set()
+    for p in pages or ():
+        try:
+            out.add(int(p))
+        except (TypeError, ValueError):
+            continue
+    return sorted(out)
+
+
+async def store_chunks(document_id: str, chunks: List[Dict[str, Any]]) -> None:
+    async with get_db() as db:
+        await db.execute("DELETE FROM document_chunks WHERE document_id = ?", (document_id,))
+        for chunk in chunks:
+            await db.execute(
+                "INSERT INTO document_chunks (document_id, page, section, text_content) VALUES (?, ?, ?, ?)",
+                (document_id, chunk.get("page", 1), chunk.get("section"), chunk.get("text", ""))
+            )
+        await db.commit()
+
+async def delete_document_chunks(document_id: str) -> None:
+    async with get_db() as db:
+        await db.execute("DELETE FROM document_chunks WHERE document_id = ?", (document_id,))
+        await db.commit()
+
+_CHAT_STOPWORDS = frozenset(
+    "a an the and or but if then else when what which who how why "
+    "is are was were be been being do does did have has had "
+    "of in on for to with as by at from into "
+    "this that these those it its s they them their he she we you i me my "
+    "main explain summarize summary describe tell give show list "
+    # Generic verbs with no discriminative power in a paper. Dropping them
+    # keeps FTS queries anchored on real domain terms.
+    "using use used based paper papers approach method".split()
+)
+
+async def get_unindexed_pdf_docs() -> List[Dict[str, Any]]:
+    """PDFs that have a file on disk but zero chunks — the reindex worklist."""
+    async with get_db() as db:
+        cursor = await db.execute("""
+            SELECT d.id, d.file_path FROM documents d
+            WHERE (d.doc_type IS NULL OR d.doc_type = 'pdf')
+              AND d.file_path IS NOT NULL
+              AND NOT EXISTS (
+                SELECT 1 FROM document_chunks c WHERE c.document_id = d.id
+              )
+        """)
+        return [dict(r) for r in await cursor.fetchall()]
+
+
+async def search_chunks(document_ids: List[str], query: str, limit: int = 10) -> List[Dict[str, Any]]:
+    if not document_ids:
+        return []
+
+    import re
+    # Strip everything except alphanumeric (incl. unicode letters/digits), keep
+    # spaces. The previous `[^a-zA-Z0-9\s]` class silently deleted accented and
+    # non-Latin characters, degrading queries in other languages to nothing.
+    words = [w for w in re.sub(r'[^\w\s]', ' ', query or '', flags=re.UNICODE).split() if w]
+    keywords = [w for w in words if w.lower() not in _CHAT_STOPWORDS]
+    terms = keywords or words
+    if not terms:
+        return []
+
+    placeholders = ",".join("?" for _ in document_ids)
+
+    async def _run(match: str) -> List[Dict[str, Any]]:
+        async with get_db() as db:
+            cursor = await db.execute(f"""
+                SELECT document_id, page, section, text_content, bm25(document_chunks_fts) as rank
+                FROM document_chunks_fts
+                WHERE document_chunks_fts MATCH ? AND document_id IN ({placeholders})
+                ORDER BY rank
+                LIMIT ?
+            """, (match, *document_ids, limit))
+            rows = await cursor.fetchall()
+            return [dict(r) for r in rows]
+
+    # FTS5 treats barewords as column filters for some tokens, and a term can
+    # be a syntax error in a MATCH expression. Wrap each term in double quotes
+    # so any word is a safe phrase literal.
+    quoted = [f'"{t}"' for t in terms]
+
+    # Prefer conjunctive match; fall back to disjunctive for short queries.
+    if len(quoted) > 1:
+        hits = await _run(" AND ".join(quoted))
+        if hits:
+            return hits
+    try:
+        return await _run(" OR ".join(quoted))
+    except aiosqlite.OperationalError:
+        # Malformed MATCH (e.g. a query FTS5 cannot parse) must not 500 chat.
+        logger = __import__("logging").getLogger("rsrch.db")
+        logger.warning("Chunk search failed for %d terms; dropping to empty", len(terms))
+        return []
 

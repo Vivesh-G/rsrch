@@ -40,12 +40,17 @@ export interface SearchResult {
 export type CategoryTag = 'NLP' | 'Architecture' | 'Foundations' | 'Strategy' | 'ML' | 'General' | string;
 
 export interface ChatMessage {
-  id?: number;
+  id?: number | string;
   chat_id?: string;
   document_id?: string | null;
   role: 'user' | 'assistant';
   content: string;
   created_at: number;
+  /** Persisted with the message — survives chat-history reload. */
+  cited_pages?: number[];
+  /** Response-only: transient LaTeX payload the UI acts on once. */
+  code_patch?: string;
+  action_type?: string;
 }
 
 export interface ChatSession {

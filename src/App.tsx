@@ -234,6 +234,20 @@ export const App: React.FC = () => {
   const [isAssetsOpen, setIsAssetsOpen] = usePersistentState<boolean>('rschr-assets-open', false);
   const [isBibtexOpen, setIsBibtexOpen] = usePersistentState<boolean>('rschr-bibtex-open', false);
   const [rightSidebarCollapsed, setRightSidebarCollapsed] = usePersistentState<boolean>('rschr-right-sidecol', false);
+  // Message queued by an out-of-chat 'rsrch:chat-send' (editor "Fix with AI").
+  // ChatPanel only listens while mounted, so App captures it and opens chat.
+  const [pendingChatSend, setPendingChatSend] = useState<string | null>(null);
+
+  useEffect(() => {
+    const onChatSend = (e: Event) => {
+      const msg = (e as CustomEvent).detail?.message;
+      if (typeof msg !== 'string' || !msg.trim()) return;
+      setPendingChatSend(msg);
+      setIsChatOpen(true);
+    };
+    window.addEventListener('rsrch:chat-send', onChatSend);
+    return () => window.removeEventListener('rsrch:chat-send', onChatSend);
+  }, [setIsChatOpen]);
   const PANEL_IDS = useMemo(() => ['viewer', 'chat', 'notes', 'assets', 'bibtex'] as string[], []);
   const [panelOrderRaw, setPanelOrder] = usePersistentState<string[]>('rschr-panel-order', ['viewer', 'chat', 'notes', 'assets', 'bibtex']);
   // Sanitize persisted order: drop unknowns/'sidebar', dedupe, append missing
@@ -1211,6 +1225,20 @@ export const App: React.FC = () => {
     return d ? d.note_title || baseName(d.name) : null;
   }, []);
 
+  // PDF/TeX docs in the active workspace for the chat context picker.
+  // Ref-based (stable identity) so the memo'd ChatPanel never re-renders just
+  // because this callback would otherwise change on every workspace change.
+  // The workspace lookup MUST mirror `activeWorkspace` (find-by-id, else first)
+  // or the picker lists a different workspace than the `≡ Add workspace` chip.
+  const listContextDocs = useCallback((): DocumentItem[] => {
+    const all = workspacesRef.current;
+    const ws = all.find((w) => w.id === activeWsIdRef.current) || all[0];
+    if (!ws) return [];
+    return ws.docs.filter(
+      (d) => d.doc_type === 'pdf' || d.doc_type === 'latex' || d.doc_type === undefined
+    );
+  }, []);
+
   const sidebarStyle = useMemo(
     () => ({ width: sidebarCollapsed ? undefined : `${sidebarWidth}px` }),
     [sidebarCollapsed, sidebarWidth]
@@ -1380,6 +1408,11 @@ export const App: React.FC = () => {
                           activeDocId={activeDocId}
                           activeDocTitle={activeDocName}
                           resolveDocTitle={resolveDocTitle}
+                          listContextDocs={listContextDocs}
+                          activeWorkspaceId={activeWorkspace?.id ?? null}
+                          activeWorkspaceName={activeWorkspace?.name ?? null}
+                          pendingSend={pendingChatSend}
+                          onPendingSendConsumed={() => setPendingChatSend(null)}
                           style={FULL_PANEL_STYLE}
                           dragHandle={dragHandle}
                           onClose={handleCloseChat}

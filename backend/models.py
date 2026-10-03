@@ -74,6 +74,9 @@ class ChatMessage(BaseModel):
     role: str
     content: str
     created_at: float
+    cited_pages: Optional[List[int]] = None
+    code_patch: Optional[str] = None
+    action_type: Optional[str] = None
 
 
 class ChatCreate(BaseModel):
@@ -94,7 +97,10 @@ class ChatSessionResponse(BaseModel):
 
 class ChatSendRequest(BaseModel):
     message: str = Field(min_length=1, max_length=4000)
-    document_ids: List[str] = Field(default_factory=list, max_length=3)
+    # Cap matches WORKSPACE_CONTEXT_DOCS in server.py: the UI context picker
+    # can multi-add, so the bound must cover every doc that can reach context.
+    document_ids: List[str] = Field(default_factory=list, max_length=6)
+    workspace_ids: List[str] = Field(default_factory=list, max_length=2)
     api_key: Optional[str] = Field(default=None, max_length=200)
     model: Optional[str] = Field(default=None, max_length=60)
 

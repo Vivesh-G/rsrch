@@ -717,8 +717,64 @@ export const CodeMirrorLatexEditor: React.FC<CodeMirrorLatexEditorProps> = ({
         onChangeRef.current(view.state.doc.toString());
       }
     };
+    
+    const handleInsert = (e: Event) => {
+      const detail = (e as CustomEvent).detail;
+      if (detail?.code != null && viewRef.current) {
+        const view = viewRef.current;
+        const selection = view.state.selection.main;
+        const code = String(detail.code);
+        // Insert at caret (selection.from), don't replace
+        view.dispatch({
+          changes: { from: selection.from, to: selection.from, insert: code },
+          selection: { anchor: selection.from + code.length },
+        });
+        view.focus();
+        if (debounceTimerRef.current) clearTimeout(debounceTimerRef.current);
+        onChangeRef.current(view.state.doc.toString());
+      }
+    };
+
+    // Ask AI to fix the compiler error. The real source lines around the
+    // failure are attached HERE, because the backend only has the chat context
+    // doc — for a long .tex file that context is nowhere near the error site.
+    const handleAskAiFix = (e: Event) => {
+      const detail = (e as CustomEvent).detail;
+      const message = String(detail?.message ?? '');
+      const line = Number(detail?.line) || 1;
+      if (!message || !viewRef.current) return;
+      const doc = viewRef.current.state.doc;
+      const ctxStart = Math.max(1, line - 12);
+      const ctxEnd = Math.min(doc.lines, line + 12);
+      const startFrom = doc.line(ctxStart - 1)?.from ?? 0;
+      const endTo = doc.line(ctxEnd - 1)?.to ?? doc.length;
+      const contextText = doc.sliceString(startFrom, endTo);
+      window.dispatchEvent(new CustomEvent('rsrch:chat-send', {
+        detail: {
+          message: [
+            '/fix Here is a Tectonic LaTeX error:',
+            '',
+            message,
+            '',
+            `The error is on line ${line} of ${doc.lines}. Source around it:`,
+            '',
+            '```latex',
+            contextText,
+            '```',
+          ].join('\n'),
+          type: 'latex_error',
+        },
+      }));
+    };
+
     window.addEventListener('rsrch:latex-apply', handleApply);
-    return () => window.removeEventListener('rsrch:latex-apply', handleApply);
+    window.addEventListener('rsrch:latex-insert', handleInsert);
+    window.addEventListener('rsrch:latex-ask-ai-fix', handleAskAiFix);
+    return () => {
+        window.removeEventListener('rsrch:latex-apply', handleApply);
+        window.removeEventListener('rsrch:latex-insert', handleInsert);
+        window.removeEventListener('rsrch:latex-ask-ai-fix', handleAskAiFix);
+    };
   }, []);
 
   useEffect(() => {
@@ -885,24 +941,53 @@ export const CodeMirrorLatexEditor: React.FC<CodeMirrorLatexEditorProps> = ({
             )}
           </div>
           {activeErrors[0].line && (
-            <button
-              type="button"
-              onClick={() => handleJumpToError(activeErrors[0].line)}
-              style={{
-                backgroundColor: 'var(--surface)',
-                border: '1px solid var(--border)',
-                borderRadius: '4px',
-                padding: '3px 8px',
-                fontSize: '11px',
-                cursor: 'pointer',
-                color: 'var(--text-primary)',
-                marginLeft: '12px',
-                flexShrink: 0,
-                fontWeight: 500,
-              }}
-            >
-              Jump to line
-            </button>
+            <>
+              <button
+                type="button"
+                onClick={() => handleJumpToError(activeErrors[0].line)}
+                style={{
+                  backgroundColor: 'var(--surface)',
+                  border: '1px solid var(--border)',
+                  borderRadius: '4px',
+                  padding: '3px 8px',
+                  fontSize: '11px',
+                  cursor: 'pointer',
+                  color: 'var(--text-primary)',
+                  marginLeft: '12px',
+                  flexShrink: 0,
+                  fontWeight: 500,
+                }}
+              >
+                Jump to line
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  // The listener in the mount effect reads the live doc and
+                  // splices in the real source lines around the error.
+                  window.dispatchEvent(new CustomEvent('rsrch:latex-ask-ai-fix', {
+                    detail: {
+                      message: activeErrors[0].message,
+                      line: activeErrors[0].line || 1,
+                    },
+                  }));
+                }}
+                style={{
+                  backgroundColor: 'var(--primary)',
+                  border: '1px solid var(--primary-hover)',
+                  borderRadius: '4px',
+                  padding: '3px 8px',
+                  fontSize: '11px',
+                  cursor: 'pointer',
+                  color: '#fff',
+                  marginLeft: '6px',
+                  flexShrink: 0,
+                  fontWeight: 500,
+                }}
+              >
+                ✨ Fix with AI
+              </button>
+            </>
           )}
         </div>
       )}

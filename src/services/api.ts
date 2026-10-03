@@ -8,10 +8,11 @@ const API_BASE = `${import.meta.env.VITE_API_URL ?? ''}/api`;
 const DEFAULT_TIMEOUT_MS = 30_000;
 const LONG_TIMEOUT_MS = 120_000; // uploads + chat generation
 
-class ApiError extends Error {
+export class ApiError extends Error {
   status: number;
   constructor(status: number, message: string) {
     super(message);
+    this.name = 'ApiError';
     this.status = status;
   }
 }
@@ -173,13 +174,13 @@ export const api = {
     }
   },
 
-  async sendChatMessage(chatId: string, message: string, documentIds: string[] = []): Promise<ChatMessage> {
+  async sendChatMessage(chatId: string, message: string, documentIds: string[] = [], workspaceIds: string[] = []): Promise<ChatMessage> {
     const data = await req<{ message: ChatMessage }>(
       `/chats/${enc(chatId)}/messages`,
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message, document_ids: documentIds }),
+        body: JSON.stringify({ message, document_ids: documentIds, workspace_ids: workspaceIds }),
       },
       LONG_TIMEOUT_MS,
     );
