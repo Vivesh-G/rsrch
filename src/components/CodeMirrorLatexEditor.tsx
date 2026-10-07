@@ -973,13 +973,13 @@ export const CodeMirrorLatexEditor: React.FC<CodeMirrorLatexEditorProps> = ({
                   }));
                 }}
                 style={{
-                  backgroundColor: 'var(--primary)',
-                  border: '1px solid var(--primary-hover)',
+                  backgroundColor: 'var(--brand)',
+                  border: '1px solid var(--brand-hover)',
                   borderRadius: '4px',
                   padding: '3px 8px',
                   fontSize: '11px',
                   cursor: 'pointer',
-                  color: '#fff',
+                  color: 'var(--text-inverse)',
                   marginLeft: '6px',
                   flexShrink: 0,
                   fontWeight: 500,

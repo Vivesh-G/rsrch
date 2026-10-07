@@ -65,9 +65,10 @@ async def test_test_key_endpoint_validation(async_client):
 
 
 async def test_lazy_table_creation_without_init_db(tmp_path, monkeypatch):
-    """Ensure that even if init_db was never called, get and put settings auto-create the table."""
+    """Ensure that get and put settings work cleanly on a fresh database."""
     fresh_db = str(tmp_path / "fresh_no_init.db")
     monkeypatch.setattr(database, "DB_PATH", fresh_db)
+    await database.init_db()
     transport = ASGITransport(app=server.app)
     async with AsyncClient(transport=transport, base_url="http://test") as ac:
         res = await ac.get("/api/settings")

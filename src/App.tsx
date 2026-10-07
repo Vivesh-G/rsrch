@@ -17,7 +17,7 @@ import { Reorder, useDragControls } from 'framer-motion';
 import { IconDragHandle, IconDoc, IconChat, IconPencil, IconBook } from './components/Icons';
 import './index.css';
 
-// Code-split the heavy PDF viewer (pdfjs-dist ~800KB) so initial load
+// Code-split the heavy PDF viewer so initial load
 // stays fast; it loads on first document open.
 const DocViewer = lazy(() =>
   import('./components/DocViewer').then((m) => ({ default: m.DocViewer }))

@@ -1,4 +1,4 @@
-import fitz  # PyMuPDF
+import pymupdf
 import re
 
 # Target chunk size handed to `_split_at_paragraphs`. Also the hard ceiling:
@@ -82,7 +82,7 @@ def chunk_pdf(file_path: str) -> list[dict]:
     Returns a list of dicts: {"page": int, "text": str, "section": str | None}
     """
     chunks = []
-    doc = fitz.open(file_path)
+    doc = pymupdf.open(file_path)
 
     try:
         current_section = None

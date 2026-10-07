@@ -62,12 +62,15 @@ const fmtWhen = (ts: number) =>
  */
 const CITATION_MARKER_RE = /\[p{1,2}s?\.\s*\d+(?:\s*[-\u2013]\s*\d+)?(?:\s*,\s*(?:p{1,2}s?\.\s*)?\d+(?:\s*[-\u2013]\s*\d+)?)*\]/g;
 
-/** Pages referenced by one marker, expanding ranges like `10-12`. */
+/** Pages referenced by one marker, expanding ranges like `10-12` or `10–12`.
+ *  The range separator must accept the en dash (\u2013) the backend's
+ *  `_CITATION_BODY` allows — otherwise `[pp. 10–12]` expands only the
+ *  endpoints (10, 12) instead of every page (10, 11, 12). */
 function pagesFromMarker(marker: string): number[] {
     const pages = new Set<number>();
     for (const part of marker.replace(/[[\]]/g, '').split(',')) {
         const nums = part.match(/\d+/g)?.map(Number) ?? [];
-        if (nums.length === 2 && /-\s*\d/.test(part)) {
+        if (nums.length === 2 && /[-\u2013]\s*\d/.test(part)) {
             const [lo, hi] = nums[0] <= nums[1] ? nums : [nums[1], nums[0]];
             if (lo >= 1 && hi - lo <= 500) {
                 for (let p = lo; p <= hi; p++) pages.add(p);

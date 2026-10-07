@@ -73,3 +73,30 @@ def test_extract_pdf_roundtrip(tmp_path):
 def test_extract_pdf_missing_file_returns_empty():
     text, pages = server._extract_pdf("/nonexistent/missing.pdf")
     assert (text, pages) == ("", 1)
+
+
+def test_backfill_chunks_with_pending_pdf_does_not_raise(tmp_path, monkeypatch):
+    """Regression: a stray `return doc` (undefined name) made `_backfill_chunks`
+    raise NameError on every boot that had an unindexed PDF, aborting the
+    lifespan background task before it indexed anything."""
+    import asyncio
+    import database
+
+    monkeypatch.setattr(database, "DB_PATH", str(tmp_path / "backfill.db"))
+
+    async def run():
+        await database.init_db()
+        ws = f"ws_{uuid.uuid4().hex[:8]}"
+        doc = f"doc_{uuid.uuid4().hex[:8]}"
+        await database.create_workspace(ws, "W")
+        # file_path set but the file does not exist, so the loop reaches the
+        # end of the function and previously hit the stray `return doc`.
+        await database.create_document(
+            doc, ws, "d.pdf", note_title="T", tag="G",
+            file_path=str(tmp_path / "missing.pdf"), page_count=1,
+            extracted_text="", doc_type="pdf",
+        )
+        assert await database.get_unindexed_pdf_docs()
+        await server._backfill_chunks()  # must complete, not NameError
+
+    asyncio.run(run())

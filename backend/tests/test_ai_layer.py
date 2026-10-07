@@ -18,8 +18,8 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import database  # noqa: E402
-from ai.modules.diagnostics import FixTectonicErrorModule  # noqa: E402
-from ai.modules.latex_copilot import SafeLatexModule  # noqa: E402
+from ai.signatures import FixTectonicError  # noqa: E402
+from ai.modules.latex_copilot import SafeLatexModule, _strip_code_fences  # noqa: E402
 from ai.modules.paper_qa import GroundedPaperQAModule  # noqa: E402
 from ai.validators import has_balanced_environments  # noqa: E402
 from server import _extract_page_citations, _strip_page_citations  # noqa: E402
@@ -97,14 +97,15 @@ def test_latex_module_returns_clean_code():
     assert result.latex_code == "\\begin{itemize}\n\\item one\n\\end{itemize}"
 
 
-def test_diagnostics_module_strips_fences():
+def test_diagnostics_strips_fences():
     import dspy
 
     good = "```latex\n\\item x\n```"
     resp = {"reasoning": "r", "explanation": "missing end", "corrected_code": good}
     with dspy.context(lm=_dummy_lm([resp] * 3)):
-        result = FixTectonicErrorModule()(error_log="err", latex_context="ctx")
-    assert result.corrected_code == "\\item x"
+        result = dspy.ChainOfThought(FixTectonicError)(error_log="err", latex_context="ctx")
+        cleaned = _strip_code_fences(result.corrected_code)
+    assert cleaned == "\\item x"
 
 
 def test_qa_module_does_not_mutate_caller_context():

@@ -88,13 +88,23 @@ async def init_db():
             pass
 
         await db.execute("""
+            CREATE TABLE IF NOT EXISTS chats (
+                id TEXT PRIMARY KEY,
+                title TEXT NOT NULL DEFAULT 'New chat',
+                document_id TEXT,
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL
+            );
+        """)
+        await db.execute("""
             CREATE TABLE IF NOT EXISTS chat_messages (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                document_id TEXT NOT NULL,
+                chat_id TEXT,
+                document_id TEXT,
                 role TEXT NOT NULL,
                 content TEXT NOT NULL,
                 created_at REAL NOT NULL,
-                FOREIGN KEY(document_id) REFERENCES documents(id) ON DELETE CASCADE
+                cited_pages TEXT DEFAULT '[]'
             );
         """)
         await db.execute("""
@@ -144,26 +154,17 @@ async def init_db():
               VALUES (new.id, new.document_id, new.page, new.section, new.text_content);
             END;
         """)
-        # Indexes for the hot paths: workspace doc lists, chat history,
-        # and the LIKE search across document fields.
+        # Indexes for the hot paths
         await db.execute(
             "CREATE INDEX IF NOT EXISTS idx_documents_workspace ON documents(workspace_id, added_at)"
         )
         await db.execute(
-            "CREATE INDEX IF NOT EXISTS idx_chat_doc ON chat_messages(document_id, created_at)"
+            "CREATE INDEX IF NOT EXISTS idx_chat_messages_chat ON chat_messages(chat_id, created_at)"
         )
         await db.execute(
             "CREATE INDEX IF NOT EXISTS idx_documents_name ON documents(name)"
         )
         await _ensure_chat_schema(db)
-        # AI citation pages (JSON array text) persist with the message so
-        # reloading chat history keeps the page badges. Response-only data
-        # used to vanish on reload; see Context.md §7.6.
-        cursor = await db.execute("PRAGMA table_info(chat_messages)")
-        if "cited_pages" not in {r["name"] for r in await cursor.fetchall()}:
-            await db.execute(
-                "ALTER TABLE chat_messages ADD COLUMN cited_pages TEXT DEFAULT '[]'"
-            )
         await db.commit()
 
         # Seed default workspace if empty
@@ -675,20 +676,8 @@ async def add_chat_message(
         return _chat_msg_row_to_msg(row)
 
 
-async def _ensure_settings_table(db: aiosqlite.Connection) -> None:
-    await db.execute("""
-        CREATE TABLE IF NOT EXISTS app_settings (
-            key TEXT PRIMARY KEY,
-            value TEXT NOT NULL,
-            updated_at REAL NOT NULL
-        );
-    """)
-    await db.commit()
-
-
 async def get_all_settings() -> Dict[str, str]:
     async with get_db() as db:
-        await _ensure_settings_table(db)
         cursor = await db.execute("SELECT key, value FROM app_settings")
         rows = await cursor.fetchall()
         return {r["key"]: r["value"] for r in rows}
@@ -696,7 +685,6 @@ async def get_all_settings() -> Dict[str, str]:
 
 async def get_setting(key: str, default: Optional[str] = None) -> Optional[str]:
     async with get_db() as db:
-        await _ensure_settings_table(db)
         cursor = await db.execute("SELECT value FROM app_settings WHERE key = ?", (key,))
         row = await cursor.fetchone()
         return row["value"] if row else default
@@ -705,7 +693,6 @@ async def get_setting(key: str, default: Optional[str] = None) -> Optional[str]:
 async def set_settings(entries: Dict[str, Any]) -> None:
     now = time.time()
     async with get_db() as db:
-        await _ensure_settings_table(db)
         for k, v in entries.items():
             if v is not None:
                 await db.execute(

@@ -158,7 +158,7 @@ export const AssetsPanel: React.FC<AssetsPanelProps> = ({
           style={{
             flex: 1,
             border: dragActive ? '2px dashed var(--accent, #007bff)' : '2px dashed transparent',
-            backgroundColor: dragActive ? 'var(--hover, rgba(0,0,0,0.05))' : 'transparent',
+            backgroundColor: dragActive ? 'var(--surface-subtle)' : 'transparent',
             borderRadius: '6px',
             transition: 'all 0.2s ease',
             overflowY: 'auto',
@@ -181,7 +181,7 @@ export const AssetsPanel: React.FC<AssetsPanelProps> = ({
                     alignItems: 'center',
                     gap: '8px',
                     fontSize: '13px',
-                    borderBottom: '1px solid var(--border-light, #eee)',
+                    borderBottom: '1px solid var(--border-subtle)',
                   }}
                 >
                   <IconDoc size={14} />

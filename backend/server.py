@@ -66,7 +66,7 @@ from models import (
 
 from compiler import run_compile, get_build_key, prune_all_builds
 import pymupdf
-from google import genai
+import httpx
 import dspy
 from ai.config import get_dspy_lm
 from ai.modules.paper_qa import GroundedPaperQAModule
@@ -316,12 +316,11 @@ async def upload_document(
     # Streamed upload: 1 MB chunks, enforce size cap as we go so a
     # 50 MB+ body never sits fully in RAM twice. First chunk carries
     # the magic-byte check (BOM/whitespace tolerant).
-    import aiofiles
-
     total = 0
     first_chunk: bytes | None = None
+    too_large = False
     try:
-        async with aiofiles.open(saved_path, "wb") as out:
+        with open(saved_path, "wb") as out:
             while True:
                 chunk = await file.read(1024 * 1024)
                 if not chunk:
@@ -330,10 +329,20 @@ async def upload_document(
                     first_chunk = chunk
                 total += len(chunk)
                 if total > MAX_UPLOAD_BYTES:
-                    raise HTTPException(status_code=413, detail="File too large")
-                await out.write(chunk)
+                    too_large = True
+                    break
+                out.write(chunk)
     finally:
         await file.close()
+    if too_large:
+        # Remove the truncated partial file we streamed before rejecting it;
+        # otherwise every oversized upload leaks a file into data/pdfs/ that
+        # is never referenced by a DB row and is never pruned.
+        try:
+            os.remove(saved_path)
+        except OSError:
+            pass
+        raise HTTPException(status_code=413, detail="File too large")
     if total == 0:
         try:
             os.remove(saved_path)
@@ -406,8 +415,6 @@ async def _backfill_chunks() -> None:
             logger.info("Chunk backfill: indexed %d chunks for %s", len(chunks), row["id"])
         except Exception:
             logger.exception("Chunk backfill failed for %s", row["id"])
-    
-    return doc
 
 
 @app.post("/api/workspaces/{ws_id}/documents/latex", response_model=DocumentResponse)
@@ -493,7 +500,6 @@ async def upload_workspace_assets(ws_id: str, files: List[UploadFile] = File(...
         raise HTTPException(status_code=400, detail="Invalid path")
     target_dir.mkdir(parents=True, exist_ok=True)
     
-    import aiofiles
     uploaded = []
     for file in files:
         if not file.filename:
@@ -515,7 +521,7 @@ async def upload_workspace_assets(ws_id: str, files: List[UploadFile] = File(...
 
         total = 0
         too_large = False
-        async with aiofiles.open(str(save_path), "wb") as out:
+        with open(save_path, "wb") as out:
             while True:
                 chunk = await file.read(1024 * 1024)
                 if not chunk:
@@ -524,7 +530,7 @@ async def upload_workspace_assets(ws_id: str, files: List[UploadFile] = File(...
                 if total > MAX_UPLOAD_BYTES:
                     too_large = True
                     break
-                await out.write(chunk)
+                out.write(chunk)
         if too_large:
             try:
                 save_path.unlink(missing_ok=True)
@@ -867,7 +873,7 @@ async def send_chat_message(chat_id: str, request: ChatSendRequest):
         with dspy.context(lm=dspy_lm):
             if command == "/latex":
                 from ai.modules.latex_copilot import SafeLatexModule
-                latex_result = SafeLatexModule().forward(
+                latex_result = SafeLatexModule()(
                     context=list(formatted_context),
                     instruction=instruction,
                 )
@@ -879,13 +885,15 @@ async def send_chat_message(chat_id: str, request: ChatSendRequest):
                     "action_type": "latex_patch",
                 }
             if command == "/fix":
-                from ai.modules.diagnostics import FixTectonicErrorModule
-                fix_result = FixTectonicErrorModule().forward(
+                from ai.signatures import FixTectonicError
+                from ai.modules.latex_copilot import _strip_code_fences
+                fix_result = dspy.ChainOfThought(FixTectonicError)(
                     error_log=instruction,
                     latex_context="\n".join(formatted_context),
                 )
-                fixed_code = _strip_page_citations(fix_result.corrected_code or "")
-                fix_expl = (fix_result.explanation or "").strip()
+                raw_code = _strip_code_fences(getattr(fix_result, "corrected_code", "") or "")
+                fixed_code = _strip_page_citations(raw_code)
+                fix_expl = (getattr(fix_result, "explanation", "") or "").strip()
                 if not has_pdf_context:
                     fix_expl = _strip_page_citations(fix_expl)
                 return {
@@ -894,9 +902,8 @@ async def send_chat_message(chat_id: str, request: ChatSendRequest):
                     "code_patch": fixed_code,
                     "action_type": "latex_patch",
                 }
-            # Retrieval already ran in this request; document_ids=[] disables
-            # in-module retrieval so no thread/event-loop bridging happens here.
-            qa_result = GroundedPaperQAModule(document_ids=[]).forward(
+            # Retrieval already ran in this request; passes context directly.
+            qa_result = GroundedPaperQAModule()(
                 system=f"{persona_prefix}. {persona_style}".strip(". "),
                 context=list(formatted_context),
                 chat_history=formatted_history,
@@ -1077,22 +1084,22 @@ async def test_api_key(payload: Optional[TestKeyPayload] = None):
     if not key:
         return {"valid": False, "error": "No API key provided or configured"}
 
-    def _probe():
-        client = genai.Client(api_key=key)
-        # Validate key by listing models with page_size=1 (costs 0 tokens, checks key directly with Google)
-        for _ in client.models.list(config={'page_size': 1}):
-            break
-        return True
-
     try:
-        await asyncio.wait_for(asyncio.to_thread(_probe), timeout=10.0)
-        return {"valid": True, "message": "API key verified successfully!"}
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(
+                "https://generativelanguage.googleapis.com/v1beta/models",
+                params={"key": key, "pageSize": "1"},
+            )
+            if resp.status_code == 200:
+                return {"valid": True, "message": "API key verified successfully!"}
+            err_data = resp.json().get("error", {}) if resp.headers.get("content-type", "").startswith("application/json") else {}
+            err_str = err_data.get("message", f"Verification failed (status {resp.status_code})")
+            if "API key not valid" in err_str or "API_KEY_INVALID" in err_str or resp.status_code == 400:
+                err_str = "API key is invalid. Please verify your key from Google AI Studio."
+            return {"valid": False, "error": err_str}
     except Exception as e:
         logger.warning("API key verification failed: %s", e)
-        err_str = str(e)
-        if "API key not valid" in err_str or "API_KEY_INVALID" in err_str:
-            err_str = "API key is invalid. Please verify your key from Google AI Studio."
-        return {"valid": False, "error": err_str}
+        return {"valid": False, "error": str(e)}
 
 
 
