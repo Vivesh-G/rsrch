@@ -10,6 +10,7 @@ import {
   IconEyeOff,
   IconSliders,
   IconCheck,
+  IconUser,
 } from './Icons';
 
 interface SettingsModalProps {
@@ -187,7 +188,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               onClick={() => setActiveTab('profile')}
               type="button"
             >
-              <span className="settings-nav-icon">👤</span>
+              <IconUser size={14} className="settings-nav-icon" />
               <span className="settings-nav-label">Profile & Identity</span>
             </button>
             <button

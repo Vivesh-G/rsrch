@@ -1357,6 +1357,7 @@ export const App: React.FC = () => {
                             searchQuery={deferredSearchQuery}
                             notesCache={sidebarNotesCache}
                             onAddPdf={handleNewDocument}
+                            onDropFiles={handleDropFiles}
                             onSelectDoc={handleSelectDoc}
                             onDeleteDoc={handleDeleteDoc2}
                             onDeleteWorkspace={requestDeleteWorkspace}

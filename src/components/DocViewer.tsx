@@ -23,6 +23,7 @@ import {
   IconTrash,
   IconEye,
   IconDoc,
+  IconLatex,
   IconPencil,
   IconCheck,
   IconHighlighter,
@@ -1076,7 +1077,11 @@ const LoadedViewer: React.FC<DocViewerProps> = ({
         <div className="viewer-toolbar-left" style={{ display: 'flex', alignItems: 'center', gap: '6px', minWidth: 0, flexShrink: 1, overflow: 'hidden' }}>
           {dragHandle && <span className="drag-handle-wrapper" style={{ flexShrink: 0 }}>{dragHandle}</span>}
           <div className="file-name" title={renaming ? `Source: ${doc.name}` : `Source: ${doc.name} (click to rename)`}>
-            <IconDoc size={13} className="viewer-doc-icon" />
+            {doc.doc_type === 'latex' ? (
+              <IconLatex size={13} className="viewer-doc-icon" />
+            ) : (
+              <IconDoc size={13} className="viewer-doc-icon" />
+            )}
             {renaming ? (
               <input
                 className="inline-rename-input"
@@ -1233,7 +1238,11 @@ const InnerViewer: React.FC<DocViewerProps> = (props) => {
               <>
                 <div className="viewer-toolbar">
                   <div className="file-name" title={`Source: ${doc.name}`}>
-                    <IconDoc size={13} className="viewer-doc-icon" />
+                    {doc.doc_type === 'latex' ? (
+                      <IconLatex size={13} className="viewer-doc-icon" />
+                    ) : (
+                      <IconDoc size={13} className="viewer-doc-icon" />
+                    )}
                     <span className="name-text">{displayTitle}</span>
                   </div>
                   {props.onClose && (

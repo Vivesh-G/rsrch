@@ -1,3 +1,4 @@
+import re
 import dspy
 from ai.signatures import SafeLatexGenerator
 from ai.validators import has_balanced_environments
@@ -5,17 +6,27 @@ from ai.validators import has_balanced_environments
 MAX_RETRIES = 3
 
 def _strip_code_fences(code: str) -> str:
-    """Remove a leading ```latex / ``` opener and the trailing ``` fence."""
-    code = (code or "").strip()
-    if code.startswith("```latex"):
-        code = code[len("```latex"):]
-    elif code.startswith("```tex"):
-        code = code[len("```tex"):]
-    elif code.startswith("```"):
-        code = code[len("```"):]
-    if code.endswith("```"):
-        code = code[: -len("```")]
-    return code.strip()
+    """Remove a leading ```latex / ``` opener and the trailing ``` fence, plus any leaked DSPy delimiters."""
+    if not code:
+        return ""
+    code = code.strip()
+    # Strip any trailing or internal DSPy delimiters e.g. [[ ## completed ## ]] or [[ ## ... ## ]]
+    code = re.sub(r"\[\[\s*##.*?##\s*\]*\]?", "", code).strip()
+
+    # If code contains markdown code fences, extract the enclosed block
+    fence_match = re.search(r"```(?:latex|tex)?\s*\n?(.*?)\n?```", code, re.DOTALL)
+    if fence_match:
+        code = fence_match.group(1).strip()
+    else:
+        for prefix in ("```latex", "```tex", "```"):
+            if code.startswith(prefix):
+                code = code[len(prefix):].strip()
+        if code.endswith("```"):
+            code = code[:-3].strip()
+
+    # Final cleanup of any trailing delimiter
+    code = re.sub(r"\[\[\s*##.*?##\s*\]*\]?", "", code).strip()
+    return code
 
 class SafeLatexModule(dspy.Module):
     def __init__(self):

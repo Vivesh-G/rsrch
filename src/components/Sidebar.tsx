@@ -156,9 +156,8 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
                         aria-label={`Add LaTeX Doc to ${w.name}`}
                         onClick={() => onAddLatexDocToWorkspace(w.id)}
                         type="button"
-                        style={{ marginRight: 2 }}
                       >
-                        <span style={{ fontSize: '10px', fontWeight: 'bold' }}>T</span>
+                        <IconLatex size={12} />
                       </button>
                     )}
                     <button

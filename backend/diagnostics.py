@@ -14,7 +14,9 @@ def parse_diagnostics(stderr: str, log_content: str) -> list[Diagnostic]:
     seen = set()
     
     def add_diag(diag: Diagnostic):
-        key = (diag.severity, diag.line, diag.message)
+        clean_msg = diag.message.strip().rstrip('.')
+        diag.message = clean_msg
+        key = (diag.severity, diag.line, clean_msg.lower())
         if key not in seen:
             seen.add(key)
             diagnostics.append(diag)

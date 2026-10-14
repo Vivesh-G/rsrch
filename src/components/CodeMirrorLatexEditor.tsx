@@ -20,6 +20,7 @@ import { katexPlugin } from './katexDecoration';
 import { LATEX_SLASH_COMMANDS, type LatexSlashCommand } from './latexAutocomplete';
 import { api } from '../services/api';
 import { fetchAndParseSynctex, invalidateSynctexCache, syncTexLineToRect, syncTexRectToLine } from '../utils/synctex';
+import { IconSparkles } from './Icons';
 
 const selectionTooltip = StateField.define<Tooltip | null>({
   create: getCursorTooltip,
@@ -746,8 +747,8 @@ export const CodeMirrorLatexEditor: React.FC<CodeMirrorLatexEditorProps> = ({
       const doc = viewRef.current.state.doc;
       const ctxStart = Math.max(1, line - 12);
       const ctxEnd = Math.min(doc.lines, line + 12);
-      const startFrom = doc.line(ctxStart - 1)?.from ?? 0;
-      const endTo = doc.line(ctxEnd - 1)?.to ?? doc.length;
+      const startFrom = (ctxStart >= 1 && ctxStart <= doc.lines) ? doc.line(ctxStart).from : 0;
+      const endTo = (ctxEnd >= 1 && ctxEnd <= doc.lines) ? doc.line(ctxEnd).to : doc.length;
       const contextText = doc.sliceString(startFrom, endTo);
       window.dispatchEvent(new CustomEvent('rsrch:chat-send', {
         detail: {
@@ -786,19 +787,26 @@ export const CodeMirrorLatexEditor: React.FC<CodeMirrorLatexEditorProps> = ({
         const rawErrors = detail.errors || [];
         setActiveErrors(rawErrors);
 
-        const cmDiagnostics = rawErrors.map((err: any) => {
+        const seenDiags = new Set<string>();
+        const cmDiagnostics: any[] = [];
+        for (const err of rawErrors) {
           let lineNo = err.line ? err.line : 1;
           if (lineNo > doc.lines) lineNo = doc.lines;
           if (lineNo < 1) lineNo = 1;
 
           const line = doc.line(lineNo);
-          return {
+          const cleanMsg = (err.message || '').trim().replace(/\.+$/, '');
+          const key = `${lineNo}:${err.severity || 'error'}:${cleanMsg.toLowerCase()}`;
+          if (seenDiags.has(key)) continue;
+          seenDiags.add(key);
+
+          cmDiagnostics.push({
             from: line.from,
             to: line.to,
             severity: err.severity === 'warning' ? 'warning' : 'error',
-            message: err.message,
-          };
-        });
+            message: cleanMsg,
+          });
+        }
 
         diagnosticsRef.current = cmDiagnostics;
         view.dispatch(setDiagnostics(view.state, cmDiagnostics));
@@ -910,11 +918,12 @@ export const CodeMirrorLatexEditor: React.FC<CodeMirrorLatexEditorProps> = ({
           <div style={{ display: 'flex', alignItems: 'center', gap: '8px', overflow: 'hidden' }}>
             <span
               style={{
-                backgroundColor: activeErrors[0].severity === 'warning' ? 'var(--warning, #eab308)' : 'var(--danger)',
-                color: '#fff',
-                borderRadius: '3px',
-                padding: '1px 6px',
-                fontWeight: 'bold',
+                backgroundColor: activeErrors[0].severity === 'warning' ? 'rgba(234, 179, 8, 0.12)' : 'rgba(239, 68, 68, 0.12)',
+                color: activeErrors[0].severity === 'warning' ? '#ca8a04' : '#ef4444',
+                border: `1px solid ${activeErrors[0].severity === 'warning' ? 'rgba(234, 179, 8, 0.28)' : 'rgba(239, 68, 68, 0.28)'}`,
+                borderRadius: 'var(--radius-sm)',
+                padding: '2px 7px',
+                fontWeight: 600,
                 fontSize: '11px',
                 flexShrink: 0,
               }}
@@ -941,30 +950,18 @@ export const CodeMirrorLatexEditor: React.FC<CodeMirrorLatexEditorProps> = ({
             )}
           </div>
           {activeErrors[0].line && (
-            <>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexShrink: 0 }}>
               <button
                 type="button"
+                className="latex-error-btn"
                 onClick={() => handleJumpToError(activeErrors[0].line)}
-                style={{
-                  backgroundColor: 'var(--surface)',
-                  border: '1px solid var(--border)',
-                  borderRadius: '4px',
-                  padding: '3px 8px',
-                  fontSize: '11px',
-                  cursor: 'pointer',
-                  color: 'var(--text-primary)',
-                  marginLeft: '12px',
-                  flexShrink: 0,
-                  fontWeight: 500,
-                }}
               >
                 Jump to line
               </button>
               <button
                 type="button"
+                className="latex-error-btn primary"
                 onClick={() => {
-                  // The listener in the mount effect reads the live doc and
-                  // splices in the real source lines around the error.
                   window.dispatchEvent(new CustomEvent('rsrch:latex-ask-ai-fix', {
                     detail: {
                       message: activeErrors[0].message,
@@ -972,22 +969,11 @@ export const CodeMirrorLatexEditor: React.FC<CodeMirrorLatexEditorProps> = ({
                     },
                   }));
                 }}
-                style={{
-                  backgroundColor: 'var(--brand)',
-                  border: '1px solid var(--brand-hover)',
-                  borderRadius: '4px',
-                  padding: '3px 8px',
-                  fontSize: '11px',
-                  cursor: 'pointer',
-                  color: 'var(--text-inverse)',
-                  marginLeft: '6px',
-                  flexShrink: 0,
-                  fontWeight: 500,
-                }}
               >
-                ✨ Fix with AI
+                <IconSparkles size={12} />
+                <span>Fix with AI</span>
               </button>
-            </>
+            </div>
           )}
         </div>
       )}

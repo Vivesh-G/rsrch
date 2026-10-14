@@ -6,7 +6,7 @@ import rehypeKatex from 'rehype-katex';
 import 'katex/dist/katex.min.css';
 import type { ChatMessage, ChatSession, DocumentItem } from '../types';
 import { api, ApiError } from '../services/api';
-import { IconPlus, IconClose, IconTrash, IconDoc } from './Icons';
+import { IconPlus, IconClose, IconTrash, IconDoc, IconHistory, IconSparkles, IconCopy, IconCheck } from './Icons';
 
 /** Mirrors MAX_ATTACHED_DOCS in backend/server.py. */
 const MAX_ATTACHED_DOCS = 6;
@@ -118,6 +118,73 @@ function transformCitations(children: React.ReactNode): React.ReactNode {
     });
 }
 
+const cleanChatContent = (raw: string): string => {
+  if (!raw) return '';
+  return raw
+    .replace(/\[\[\s*##.*?##\s*\]*\]?/g, '')
+    .replace(/\[\[\s*##\s*completed\b.*/gi, '')
+    .trim();
+};
+
+const LatexCodeBlock: React.FC<{
+  code: string;
+  className?: string;
+  children: React.ReactNode;
+  props: any;
+}> = ({ code, className, children, props }) => {
+  const [copied, setCopied] = useState(false);
+
+  if (!code.trim()) return null;
+
+  const handleCopy = () => {
+    navigator.clipboard.writeText(code);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1500);
+  };
+
+  return (
+    <div className="ai-code-block" style={{ position: 'relative', marginTop: 10, marginBottom: 10 }}>
+      <div className="code-block-header">
+        <span className="code-block-lang">LaTeX</span>
+        <div style={{ display: 'flex', gap: '6px', alignItems: 'center' }}>
+          <button
+            className="code-action-btn"
+            onClick={handleCopy}
+            title="Copy to clipboard"
+            type="button"
+          >
+            {copied ? <IconCheck size={12} /> : <IconCopy size={12} />}
+            <span>{copied ? 'Copied' : 'Copy'}</span>
+          </button>
+          <button
+            className="code-action-btn"
+            onClick={() => window.dispatchEvent(new CustomEvent('rsrch:latex-insert', { detail: { code } }))}
+            title="Insert at caret position"
+            type="button"
+          >
+            <IconPlus size={12} />
+            <span>Insert</span>
+          </button>
+          <button
+            className="code-action-btn primary"
+            onClick={() => window.dispatchEvent(new CustomEvent('rsrch:latex-apply', { detail: { code } }))}
+            title="Replace currently selected text"
+            type="button"
+          >
+            <IconSparkles size={12} />
+            <span>Replace Selection</span>
+          </button>
+        </div>
+      </div>
+      <pre style={{ margin: 0, borderTopLeftRadius: 0, borderTopRightRadius: 0, padding: '12px' }}>
+        <code className={className} {...props}>
+          {children}
+        </code>
+      </pre>
+    </div>
+  );
+};
+
 const MemoizedMessageList = React.memo(({ messages, isWaiting }: { messages: ChatMessage[], isWaiting: boolean }) => (
   <>
     {messages.length === 0 && (
@@ -139,64 +206,28 @@ const MemoizedMessageList = React.memo(({ messages, isWaiting }: { messages: Cha
                   const match = /language-(\w+)/.exec(className || '');
                   const lang = match?.[1]?.toLowerCase();
                   const isLatex = lang === 'latex' || lang === 'tex';
+                  const flatten = (n: React.ReactNode): string =>
+                    Array.isArray(n)
+                      ? n.map(flatten).join('')
+                      : typeof n === 'string' || typeof n === 'number'
+                        ? String(n)
+                        : '';
+                  const code = flatten(children).replace(/\n$/, '');
                   if (isLatex) {
-                    const flatten = (n: React.ReactNode): string =>
-                      Array.isArray(n)
-                        ? n.map(flatten).join('')
-                        : typeof n === 'string' || typeof n === 'number'
-                          ? String(n)
-                          : '';
-                    const code = flatten(children).replace(/\n$/, '');
                     return (
-                      <div className="ai-code-block" style={{ position: 'relative', marginTop: 8, marginBottom: 8 }}>
-                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: 'var(--surface-subtle)', padding: '4px 8px', borderTopLeftRadius: 4, borderTopRightRadius: 4, fontSize: 12 }}>
-                          <span style={{ color: 'var(--text-tertiary)' }}>LaTeX</span>
-                          <div style={{ display: 'flex', gap: '6px' }}>
-                            <button 
-                              className="pdf-popup-btn" 
-                              style={{ height: 22, padding: '0 8px', fontSize: 11 }}
-                              onClick={() => {
-                                navigator.clipboard.writeText(code);
-                                // Optional: simple toast or visual feedback could be added here
-                              }}
-                              title="Copy to clipboard"
-                              type="button"
-                            >
-                              Copy
-                            </button>
-                            <button 
-                              className="pdf-popup-btn" 
-                              style={{ height: 22, padding: '0 8px', fontSize: 11 }}
-                              onClick={() => window.dispatchEvent(new CustomEvent('rsrch:latex-insert', { detail: { code } }))}
-                              title="Insert at caret position"
-                              type="button"
-                            >
-                              Insert
-                            </button>
-                            <button 
-                              className="pdf-popup-btn primary" 
-                              style={{ height: 22, padding: '0 8px', fontSize: 11 }}
-                              onClick={() => window.dispatchEvent(new CustomEvent('rsrch:latex-apply', { detail: { code } }))}
-                              title="Replace currently selected text"
-                              type="button"
-                            >
-                              ✨ Replace Selection
-                            </button>
-                          </div>
-                        </div>
-                        <pre style={{ margin: 0, borderTopLeftRadius: 0, borderTopRightRadius: 0, padding: '12px' }}>
-                          <code className={className} {...props}>
-                            {children}
-                          </code>
-                        </pre>
-                      </div>
+                      <LatexCodeBlock code={code} className={className} props={props}>
+                        {children}
+                      </LatexCodeBlock>
                     );
+                  }
+                  if (!code.trim()) {
+                    return null;
                   }
                   return <code className={className} {...props}>{children}</code>;
                 }
               }}
             >
-              {msg.content}
+              {cleanChatContent(msg.content)}
             </ReactMarkdown>
             {(() => {
                 // Pages already rendered as inline badges must not be repeated
@@ -531,7 +562,7 @@ const ChatPanelInner = ({ activeDocId, activeDocTitle, resolveDocTitle, listCont
             {view !== 'history' && (
               <>
                 <button className="icon-btn small" title="View past chats" aria-label="View past chats" onClick={() => { setView('history'); setConfirmDeleteId(null); }} type="button">
-                  <IconDoc size={13} />
+                  <IconHistory size={13} />
                 </button>
                 <button className="icon-btn small" title="Start a new blank chat" aria-label="Start a new blank chat" onClick={startBlank} type="button">
                   <IconPlus size={12} />

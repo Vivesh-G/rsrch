@@ -195,11 +195,13 @@ const TopBarInner: React.FC<TopBarProps> = ({
             onClick={onOpenSettings}
             type="button"
           >
-            <div className="avatar">{userInitial}</div>
+            <div className="avatar-wrap" style={{ position: 'relative', display: 'inline-flex' }}>
+              <div className="avatar">{userInitial}</div>
+              {!hasApiKey && (
+                <span className="user-warning-dot" title="API Key not configured" />
+              )}
+            </div>
             <span>{displayName}</span>
-            {!hasApiKey && (
-              <span className="user-warning-dot" title="API Key not configured" />
-            )}
           </button>
         </div>
       </header>

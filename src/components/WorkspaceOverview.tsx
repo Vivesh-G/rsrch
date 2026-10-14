@@ -8,6 +8,7 @@ interface WorkspaceOverviewProps {
   searchQuery: string;
   notesCache?: Record<string, string>;
   onAddPdf: () => void;
+  onDropFiles?: (files: FileList) => void;
   onSelectDoc: (wsId: string, docId: string) => void;
   onDeleteDoc?: (wsId: string, docId: string) => void;
   onDeleteWorkspace?: (wsId: string) => void;
@@ -23,6 +24,7 @@ const WorkspaceOverviewInner: React.FC<WorkspaceOverviewProps> = ({
   searchQuery,
   notesCache,
   onAddPdf,
+  onDropFiles,
   onSelectDoc,
   onDeleteDoc,
   onDeleteWorkspace,
@@ -30,6 +32,7 @@ const WorkspaceOverviewInner: React.FC<WorkspaceOverviewProps> = ({
   onClose,
   dragHandle,
 }) => {
+  const [isDraggingOver, setIsDraggingOver] = useState(false);
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState('');
 
@@ -57,7 +60,24 @@ const WorkspaceOverviewInner: React.FC<WorkspaceOverviewProps> = ({
   const docCount = docs.length;
 
   return (
-    <div id="wsOverview" className="ws-overview">
+    <div
+      id="wsOverview"
+      className={`ws-overview ${isDraggingOver ? 'drag-over' : ''}`}
+      style={{ position: 'relative' }}
+      onDragEnter={(e) => { e.preventDefault(); setIsDraggingOver(true); }}
+      onDragOver={(e) => { e.preventDefault(); setIsDraggingOver(true); }}
+      onDragLeave={(e) => { e.preventDefault(); setIsDraggingOver(false); }}
+      onDrop={(e) => {
+        e.preventDefault();
+        setIsDraggingOver(false);
+        if (e.dataTransfer.files?.length && onDropFiles) {
+          onDropFiles(e.dataTransfer.files);
+        }
+      }}
+    >
+      {isDraggingOver && (
+        <div className="drop-hint">Drop PDF here to add to workspace</div>
+      )}
       <div className="ws-ov-head" style={{ position: 'relative', display: 'flex', alignItems: 'center', justifyContent: 'space-between', minWidth: 0, gap: '8px' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: '10px', minWidth: 0, flex: 1, overflow: 'hidden' }}>
           {dragHandle && <span className="drag-handle-wrapper" style={{ flexShrink: 0 }}>{dragHandle}</span>}
@@ -202,6 +222,7 @@ export const WorkspaceOverview = React.memo(
       prev.notesCache === next.notesCache &&
       prev.onClose === next.onClose &&
       prev.onAddPdf === next.onAddPdf &&
+      prev.onDropFiles === next.onDropFiles &&
       prev.onSelectDoc === next.onSelectDoc &&
       prev.onDeleteDoc === next.onDeleteDoc &&
       prev.onDeleteWorkspace === next.onDeleteWorkspace &&

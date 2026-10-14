@@ -58,9 +58,10 @@ Because there is no backend server to hold an API key:
   *(Google Gemini's public REST API explicitly supports browser CORS headers for client-side web apps).*
 
 #### 4. LaTeX Strategy in Pure Web Mode
-Running a full Tectonic or TeX Live CLI is impossible in pure client-side JavaScript without a massive (~40MB+) WebAssembly TeX distribution.
-* **Option 1 (Recommended):** Provide a live **KaTeX / MathJax** split preview for authoring equations and markdown notes.
-* **Option 2 (Optional Endpoint):** Allow power users to plug in a custom external compilation URL in settings (e.g., self-hosted compiler or cloud worker).
+Running a full TeX Live or Tectonic compiler natively in the browser was historically prohibitive, but modern WebAssembly distributions now make client-side compilation completely viable:
+* **Option 1 (Client-Side WASM Engine - Recommended):** Use **`corca-ai/wasmtex`** inside a Web Worker. It compiles LaTeX directly to PDF in-memory and includes built-in bidirectional **SyncTeX** mapping (`wasmtex/synctex`) for CodeMirror $\leftrightarrow$ PDF viewer synchronization.
+* **Option 2 (Modular TeX Live WASM):** Use **`texlyre-busytex`** if dedicated `biber` or `bibtex8` citation processing is required.
+* **Option 3 (Lightweight Fallback):** Provide live **KaTeX** previews for standalone math and equations without requiring full document compilation.
 
 #### 5. Data Safety & Portability (Backup / Restore)
 Because browser cache can be cleared by the user or the operating system under low-storage conditions:
@@ -83,32 +84,88 @@ export interface StorageDriver {
   getNote(docId: string): Promise<NoteData>;
   saveNote(docId: string, content: string): Promise<NoteData>;
   sendChatMessage(chatId: string, message: string, docIds: string[]): Promise<ChatMessage>;
+  compileLatex?(docId: string, source: string): Promise<CompileResult>;
 }
 ```
 
 * **`HttpStorageDriver`:** Calls FastAPI endpoints (used when running via `run.bat` / `run.sh` or local dev).
-* **`IndexedDbStorageDriver`:** Interacts directly with browser IndexedDB and the Gemini REST API.
-* **Automatic Detection:** The app can automatically fall back to `IndexedDbStorageDriver` if `/api/health` is unreachable, enabling offline and static deployments seamlessly.
+* **`IndexedDbStorageDriver`:** Interacts directly with browser IndexedDB, local Web Workers, and the Gemini REST API.
+* **Automatic Detection:** The app automatically falls back to `IndexedDbStorageDriver` if `/api/health` is unreachable, enabling offline and static deployments seamlessly.
 
 ---
 
 ## 5. Architectural Comparison Matrix
 
-| Characteristic | Standalone Binary (PyInstaller) | Launcher Scripts (`run.bat` / `run.sh`) | Complete Web Version (IndexedDB) |
+| Characteristic | Standalone Binary (PyInstaller) | Launcher Scripts (`run.bat` / `run.sh`) | Complete Web Version (Client-Side WASM) |
 |---|---|---|---|
-| **Hosting Cost** | $0 (Local) | $0 (Local) | **$0/month** (Static CDN / GitHub Pages) |
+| **Hosting Cost** | $0 (Local) | $0 (Local) | **$0/month** (Static CDN: Cloudflare / GitHub Pages) |
 | **Prerequisites** | None | Python 3.11+ | **None** (Any modern browser) |
 | **User Setup Time** | Download & Click | 1 click / command | **Instant** (Navigate to URL) |
-| **Binary / Asset Size** | 200MB+ per OS | ~20MB repo + venv | **~3MB** static web bundle |
-| **Data Privacy** | 100% Local | 100% Local | **100% Local** (Stays in browser) |
-| **Offline Capability** | Yes | Yes | **Yes** (PWA / Service Worker) |
-| **Full LaTeX (Tectonic)** | Yes | Yes (Host binary) | No (KaTeX preview or remote webhook) |
-| **Maintenance Burden** | High (CI matrix + Notarization) | **Minimal** (Simple shell scripts) | **Low** (Standard static React SPA) |
+| **Binary / Asset Size** | 200MB+ per OS | ~20MB repo + venv | ~3MB web app + ~30MB cached WASM TeX assets |
+| **Data Privacy** | 100% Local | 100% Local | **100% Local** (Stays inside browser IndexedDB) |
+| **Offline Capability** | Yes | Yes | **Yes** (PWA / Cache Storage API) |
+| **Full LaTeX Compilation** | Yes (Host Tectonic binary) | Yes (Host Tectonic binary) | **Yes** (Client-side WASM via `corca-ai/wasmtex`) |
+| **Interactive SyncTeX** | Yes (Backend parser) | Yes (Backend parser) | **Yes** (Client-side `wasmtex/synctex`) |
+| **Maintenance Burden** | High (CI matrix + Notarization) | Minimal (Simple shell scripts) | **Lowest** (Zero backend infrastructure to run) |
 
 ---
 
-## 6. Recommended Action Plan
+## 6. Frontend Framework Selection (Next.js vs. SolidJS vs. React 19)
 
-1. **Near-Term:** Implement `run.bat` and `run.sh` in the repository root for immediate one-click local launches without Node.js friction.
-2. **Mid-Term:** Refactor `src/services/api.ts` into a pluggable storage driver interface (`HttpDriver` vs. `IndexedDbDriver`).
-3. **Long-Term:** Add the IndexedDB store and client-side Gemini fetch to enable zero-install static deployments on GitHub Pages or Cloudflare Pages.
+For a local-first, zero-backend workspace running heavy WASM and canvas workloads:
+
+| Metric | Next.js (App Router) | React 19 + Vite (Current Stack) | SolidJS + Vite |
+|---|---|---|---|
+| **Hosting Cost** | $0 only if strictly configured with `output: 'export'` | **$0 forever** (Cloudflare / GitHub Pages) | **$0 forever** (Cloudflare / GitHub Pages) |
+| **WASM / Canvas / Web Worker Fit** | ⚠️ **Clunky** (Hydration mismatches, requires `'use client'` and dynamic `ssr: false` everywhere) | **Clean** (Pure SPA lifecycle, no hydration conflicts) | ⚡ **Best** (Reactive signals bind directly to Web Workers outside UI) |
+| **Editor & Token Streaming Perf** | Medium (VDOM reconciliation overhead on fast typing/streaming) | Medium (Requires careful `memo`/`useCallback` to prevent render lag) | ⚡ **Blazing Fast** (Zero VDOM, fine-grained DOM surgical updates) |
+| **Existing Codebase Effort** | ⚠️ High (Need to dismantle SSR and reconfigure routing) | **Zero** (All 19 components already built and working) | ⚠️ High (Must rewrite ~1,300 lines of `@embedpdf` & hooks) |
+| **Runtime Bundle Size** | ~90–120 KB | ~45 KB | **~7 KB** |
+| **Verdict** | ❌ **Not recommended** | 🏆 **Best for shipping immediately** | 🚀 **Best for clean-slate peak performance** |
+
+### Key Takeaways:
+* **Avoid Next.js:** Private workspaces have zero SEO needs. Server-side rendering (SSR) only creates friction with browser canvas engines (`@embedpdf`) and WebAssembly modules.
+* **Keep React 19 + Vite to Ship Today:** `DocViewer.tsx` has 1,300+ lines tightly coupled to `@embedpdf/*/react`. Keeping React allows converting to a zero-cost client-side app by only updating `src/services/api.ts` without touching UI components.
+* **Choose SolidJS if Rebuilding from Scratch:** Solid's lack of a Virtual DOM makes live CodeMirror math editing and token streaming feel native with zero micro-stutters.
+
+---
+
+## 7. Client-Side LaTeX WASM Engine Evaluation
+
+Comparison of browser-ready WebAssembly TeX engines to replace the backend Tectonic CLI:
+
+| Evaluation Criteria | 🥇 `corca-ai/wasmtex` | 🥈 `TeXlyre/texlyre-busytex` | 🥉 `tectonic-wasm` (`nl5887`) |
+|---|---|---|---|
+| **Underlying Engine** | TeX Live (pdfLaTeX, XeLaTeX, LuaLaTeX) | BusyTeX (TeX Live multi-call WASM) | Tectonic (XeTeX fork in Rust/C++) |
+| **Interactive SyncTeX** | 🏆 **Built-in (`wasmtex/synctex`)**<br>2-way coordinate $\leftrightarrow$ line parser included | ⚠️ Outputs `.synctex.gz`<br>(Requires custom JS parser) | ❌ **Unsupported**<br>(Only returns raw PDF bytes) |
+| **Project Status** | 🟢 **Actively maintained** (2025/2026)<br>Powers production app CorTeX | 🟢 **Actively maintained** (2025/2026)<br>Powers collaborative TeXlyre | 🔴 **Stale / Experimental**<br>Unmaintained community hobby port |
+| **Package Support** | Full standard TeX Live bundles | Modular data packages (`texlive-basic.js`) | Restricted to static bundle; fails on missing packages |
+| **Bibliographies** | Multi-pass engine compilation | 🏆 Dedicated **`biber`** & **`bibtex8`** WASM binaries | Barebones / unreliable |
+| **Editor API** | 🏆 **`wasmtex/headless`**<br>(DOM-free, virtual in-memory filesystem) | `BusyTexRunner`<br>(Web Worker runner) | Basic `compile_tex()` string function |
+| **npm Distribution** | `github:corca-ai/wasmtex#main` | Published on npm registry (`texlyre-busytex`) | GitHub clone / manual build |
+
+### Why `corca-ai/wasmtex` is the Primary Choice for Rsrch:
+1. **Solves SyncTeX Out-of-the-Box:** It includes `wasmtex/synctex`, preserving Rsrch's core forward and inverse line-to-PDF synchronization.
+2. **Headless-First Design:** `wasmtex/headless` accepts an in-memory dictionary of virtual files (`'main.tex'`, images, `.sty` macros), ideal for CodeMirror integration.
+3. **Why Not `tectonic-wasm`:** Upstream Tectonic has no official WASM target yet. Community WASM builds lack SyncTeX outputs, cannot dynamically fetch packages from CTAN due to browser socket restrictions, and are largely experimental prototypes.
+
+---
+
+## 8. Recommended Implementation Roadmap
+
+1. **Phase 1: Dual-Driver Storage Layer**
+   * Implement `IndexedDbStorageDriver` using `idb` or `Dexie.js`.
+   * Store raw PDF Blobs, workspaces, documents, and notes locally.
+2. **Phase 2: Client-Side Gemini AI (BYOK)**
+   * Add an API key field in UI settings.
+   * Direct browser `fetch()` calls to `generativelanguage.googleapis.com` (CORS-enabled by Google AI Studio).
+3. **Phase 3: Client-Side PDF Text Extraction**
+   * Run `pdfjs-dist` in a Web Worker to extract page text upon drop/upload, saving chunks to IndexedDB.
+4. **Phase 4: In-Browser LaTeX Compilation & SyncTeX**
+   * Mount `wasmtex/headless` inside a dedicated Web Worker (`compiler.worker.ts`).
+   * Cache engine WASM assets in Cache Storage / IndexedDB on initial load.
+   * Connect `wasmtex/synctex` to CodeMirror line clicks and EmbedPDF coordinates.
+5. **Phase 5: Deploy Static Bundle**
+   * Build with `npm run build` (`vite build`).
+   * Deploy `dist/` to **Cloudflare Pages** or **GitHub Pages** for $0/month lifetime hosting.
+

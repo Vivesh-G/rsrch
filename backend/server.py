@@ -161,6 +161,17 @@ def _strip_page_citations(text: str) -> str:
     return _STRIPPABLE_CITATION_RE.sub("", text or "")
 
 
+def _sanitize_output(text: str) -> str:
+    """Remove leaked DSPy delimiter tags (e.g. [[ ## completed ## ]]) from model text."""
+    if not text:
+        return ""
+    # Strip [[ ## completed ## ]] or [[ ## field ## ]]
+    cleaned = re.sub(r"\[\[\s*##.*?##\s*\]*\]?", "", text)
+    # Strip standalone [[ ## completed ## or similar unfinished brackets
+    cleaned = re.sub(r"\[\[\s*##\s*completed\b.*", "", cleaned, flags=re.IGNORECASE)
+    return cleaned.strip()
+
+
 def _extract_page_citations(text: str) -> list[int]:
     """Backup citation parse: every page number inside any [p. ...] marker.
 
@@ -877,7 +888,7 @@ async def send_chat_message(chat_id: str, request: ChatSendRequest):
                     context=list(formatted_context),
                     instruction=instruction,
                 )
-                latex_code = _strip_page_citations(latex_result.latex_code or "")
+                latex_code = _sanitize_output(_strip_page_citations(latex_result.latex_code or ""))
                 return {
                     "answer": f"Here is the generated LaTeX:\n\n```latex\n{latex_code}\n```",
                     "cited_pages": [],
@@ -892,7 +903,7 @@ async def send_chat_message(chat_id: str, request: ChatSendRequest):
                     latex_context="\n".join(formatted_context),
                 )
                 raw_code = _strip_code_fences(getattr(fix_result, "corrected_code", "") or "")
-                fixed_code = _strip_page_citations(raw_code)
+                fixed_code = _sanitize_output(_strip_page_citations(raw_code))
                 fix_expl = (getattr(fix_result, "explanation", "") or "").strip()
                 if not has_pdf_context:
                     fix_expl = _strip_page_citations(fix_expl)
@@ -909,7 +920,7 @@ async def send_chat_message(chat_id: str, request: ChatSendRequest):
                 chat_history=formatted_history,
                 question=msg_text,
             )
-            answer_text = (getattr(qa_result, "answer", "") or "").strip()
+            answer_text = _sanitize_output((getattr(qa_result, "answer", "") or "").strip())
             if not has_pdf_context:
                 answer_text = _strip_page_citations(answer_text)
                 cited_pages: list[int] = []
@@ -944,7 +955,7 @@ async def send_chat_message(chat_id: str, request: ChatSendRequest):
             "action_type": None,
         }
 
-    model_reply = (generated.get("answer") or "").strip()
+    model_reply = _sanitize_output((generated.get("answer") or "").strip())
     if not model_reply:
         model_reply = "Sorry, I received an empty response from the model."
 

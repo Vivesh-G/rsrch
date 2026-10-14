@@ -1,5 +1,5 @@
 import React from 'react';
-import { IconDoc, IconChat, IconPencil, IconChevronLeft, IconChevronRight, IconRef } from './Icons';
+import { IconDoc, IconChat, IconPencil, IconChevronLeft, IconChevronRight, IconRef, IconFolder } from './Icons';
 
 interface RightSidebarProps {
   collapsed: boolean;
@@ -114,7 +114,7 @@ export const RightSidebar: React.FC<RightSidebarProps> = React.memo(({
           aria-label="Toggle Assets panel"
         >
           {isAssetsOpen && <span className="right-sidebar-active-bar" />}
-          <IconDoc size={17} />
+          <IconFolder size={17} />
           <span className="right-sidebar-tooltip" aria-hidden="true">
             Assets
             <small>{isAssetsOpen ? 'Open' : 'Collapsed'}</small>
