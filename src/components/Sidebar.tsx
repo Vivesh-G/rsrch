@@ -1,6 +1,8 @@
 import React, { useMemo, useState } from 'react';
 import type { Workspace } from '../types';
-import { docMatchesQuery } from '../utils/search';
+import { buildLoweredNotes, docMatchesQuery } from '../utils/search';
+import { getDocDisplayName, isLatexDoc } from '../utils/document';
+import { InlineRenameInput } from './InlineRenameInput';
 import { IconDoc, IconTrash, IconPlus, IconChevronLeft, IconChevronRight, IconLatex } from './Icons';
 
 interface SidebarProps {
@@ -19,11 +21,9 @@ interface SidebarProps {
   onAddDocToWorkspace: (wsId: string) => void;
   onAddLatexDocToWorkspace?: (wsId: string) => void;
   onDeleteWorkspace?: (wsId: string) => void;
-  onDeleteDoc?: (wsId: string, docId: string) => void;
+  onDeleteDoc?: (docId: string) => void;
   onRenameDoc?: (docId: string, title: string) => void;
 }
-
-const baseName = (n?: string) => (n || '').replace(/\.pdf$/i, '');
 
 export const Sidebar: React.FC<SidebarProps> = React.memo(({
   workspaces,
@@ -45,27 +45,14 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
   onRenameDoc,
 }) => {
   const [renamingId, setRenamingId] = useState<string | null>(null);
-  const [renameValue, setRenameValue] = useState('');
-
-  const commitRename = (docId: string, fallback: string) => {
-    setRenamingId(null);
-    if (renameValue.trim() && renameValue.trim() !== fallback) {
-      onRenameDoc?.(docId, renameValue);
-    }
-  };
   const query = searchQuery.trim().toLowerCase();
 
   // Pre-lowercase note contents once per cache change so per-keystroke
   // filtering doesn't call toLowerCase() on multi-KB notes for every doc.
-  const loweredNotes = useMemo(() => {
-    if (!query) return null;
-    const map: Record<string, string> = {};
-    for (const k of Object.keys(notesCache)) {
-      const v = notesCache[k];
-      map[k] = typeof v === 'string' ? v.toLowerCase() : '';
-    }
-    return map;
-  }, [notesCache, query]);
+  const loweredNotes = useMemo(
+    () => (query ? buildLoweredNotes(notesCache) : null),
+    [notesCache, query],
+  );
 
   const filteredWorkspaces = useMemo(() => {
     if (!query) return null;
@@ -185,39 +172,32 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
                   <div className="ws-docs">
                     {!matchedDocs.length && !query && (
                       <div className="ws-tree-empty-branch">
-                        <span>No PDFs yet</span>
+                        <span>No documents yet</span>
                       </div>
                     )}
                     {matchedDocs.map((d) => {
                       const isDocActive = d.id === activeDocId;
-                      const title = d.note_title || baseName(d.name);
+                      const title = getDocDisplayName(d);
                       return (
                         <div
                           key={d.id}
                           className={`doc-item-row ${isDocActive ? 'active' : ''}`}
                           onClick={() => onSelectDoc(w.id, d.id)}
                         >
-                          {d.doc_type === 'latex' ? (
+                          {isLatexDoc(d) ? (
                             <IconLatex size={13} className="doc-icon" />
                           ) : (
                             <IconDoc size={13} className="doc-icon" />
                           )}
                           {renamingId === d.id ? (
-                            <input
+                            <InlineRenameInput
                               className="inline-rename-input small"
-                              value={renameValue}
-                              autoFocus
-                              onFocus={(e) => e.target.select()}
-                              onChange={(e) => setRenameValue(e.target.value)}
-                              onBlur={() => commitRename(d.id, title)}
-                              onKeyDown={(e) => {
-                                if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
-                                if (e.key === 'Escape') setRenamingId(null);
+                              initialValue={title}
+                              onCommit={(nextTitle) => {
+                                setRenamingId(null);
+                                onRenameDoc?.(d.id, nextTitle);
                               }}
-                              onClick={(e) => e.stopPropagation()}
-                              onDoubleClick={(e) => e.stopPropagation()}
-                              maxLength={120}
-                              placeholder="Enter title"
+                              onCancel={() => setRenamingId(null)}
                             />
                           ) : (
                             <span
@@ -226,7 +206,6 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
                               onDoubleClick={(e) => {
                                 if (!onRenameDoc) return;
                                 e.stopPropagation();
-                                setRenameValue(title);
                                 setRenamingId(d.id);
                               }}
                             >
@@ -239,7 +218,7 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
                             aria-label={`Delete "${title}"`}
                             onClick={(e) => {
                               e.stopPropagation();
-                              onDeleteDoc?.(w.id, d.id);
+                              onDeleteDoc?.(d.id);
                             }}
                             type="button"
                           >

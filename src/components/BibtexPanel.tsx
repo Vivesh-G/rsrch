@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import type { Workspace } from '../types';
 import { api } from '../services/api';
+import { emitEvent } from '../utils/events';
 import { IconClose, IconCheck, IconSave } from './Icons';
 
 interface BibtexPanelProps {
@@ -16,45 +17,53 @@ export const BibtexPanel: React.FC<BibtexPanelProps> = ({
   onClose,
   dragHandle,
 }) => {
+  const workspaceId = workspace?.id ?? null;
   const [content, setContent] = useState('');
   const [saveStatus, setSaveStatus] = useState<'idle' | 'saving' | 'saved'>('idle');
   const debounceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const savedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
-    if (!workspace) return;
-    const fetchBibtex = async () => {
-      try {
-        const res = await fetch(`${api.baseUrl}/workspaces/${workspace.id}/bibtex`);
-        if (res.ok) {
-          const data = await res.json();
-          setContent(data.content || '');
-        }
-      } catch (err) {
+    if (!workspaceId) {
+      setContent('');
+      return;
+    }
+    let mounted = true;
+    api
+      .getBibtex(workspaceId)
+      .then((text) => {
+        if (mounted) setContent(text);
+      })
+      .catch((err) => {
         console.error('Failed to fetch bibtex', err);
-      }
+        if (mounted) setContent('');
+      });
+    return () => {
+      mounted = false;
     };
-    fetchBibtex();
-  }, [workspace]);
+  }, [workspaceId]);
+
+  useEffect(() => {
+    return () => {
+      if (debounceTimerRef.current) clearTimeout(debounceTimerRef.current);
+      if (savedTimerRef.current) clearTimeout(savedTimerRef.current);
+    };
+  }, []);
 
   const saveBibtex = useCallback(async (newContent: string) => {
-    if (!workspace) return;
+    if (!workspaceId) return;
     setSaveStatus('saving');
     try {
-      const res = await fetch(`${api.baseUrl}/workspaces/${workspace.id}/bibtex`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ content: newContent }),
-      });
-      if (res.ok) {
-        setSaveStatus('saved');
-        setTimeout(() => setSaveStatus('idle'), 2000);
-        window.dispatchEvent(new CustomEvent('rsrch:bibtex-updated'));
-      }
+      await api.saveBibtex(workspaceId, newContent);
+      setSaveStatus('saved');
+      if (savedTimerRef.current) clearTimeout(savedTimerRef.current);
+      savedTimerRef.current = setTimeout(() => setSaveStatus('idle'), 2000);
+      emitEvent('bibtex-updated');
     } catch (err) {
       console.error('Failed to save bibtex', err);
       setSaveStatus('idle');
     }
-  }, [workspace]);
+  }, [workspaceId]);
 
   const handleChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
     const val = e.target.value;
@@ -75,7 +84,7 @@ export const BibtexPanel: React.FC<BibtexPanelProps> = ({
       <aside className="notes is-inactive" style={style}>
         <div className="notes-placeholder">
           {onClose && (
-            <button className="icon-btn small panel-close-btn" onClick={onClose}>
+            <button className="icon-btn small panel-close-btn" onClick={onClose} type="button">
               <IconClose size={13} />
             </button>
           )}

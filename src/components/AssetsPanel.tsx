@@ -1,11 +1,8 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import type { Workspace } from '../types';
+import type { Workspace, WorkspaceAsset } from '../types';
 import { api } from '../services/api';
+import { useFileDrop } from '../hooks/useFileDrop';
 import { IconClose, IconDoc } from './Icons';
-
-interface Asset {
-  path: string;
-}
 
 interface AssetsPanelProps {
   workspace: Workspace | null;
@@ -20,74 +17,49 @@ export const AssetsPanel: React.FC<AssetsPanelProps> = ({
   onClose,
   dragHandle,
 }) => {
-  const [assets, setAssets] = useState<Asset[]>([]);
+  const workspaceId = workspace?.id ?? null;
+  const [assets, setAssets] = useState<WorkspaceAsset[]>([]);
   const [isUploading, setIsUploading] = useState(false);
-  const [dragActive, setDragActive] = useState(false);
 
   const fetchAssets = useCallback(async () => {
-    if (!workspace) return;
+    if (!workspaceId) {
+      setAssets([]);
+      return;
+    }
     try {
-      const res = await fetch(`${api.baseUrl}/workspaces/${workspace.id}/assets`);
-      if (res.ok) {
-        const data = await res.json();
-        setAssets(data.assets || []);
-      }
+      const list = await api.getWorkspaceAssets(workspaceId);
+      setAssets(list);
     } catch (err) {
       console.error('Failed to fetch assets', err);
+      setAssets([]);
     }
-  }, [workspace]);
+  }, [workspaceId]);
 
   useEffect(() => {
     fetchAssets();
   }, [fetchAssets]);
 
-  const uploadFiles = async (files: File[]) => {
-    if (!workspace || files.length === 0) return;
+  const uploadFiles = useCallback(async (files: File[]) => {
+    if (!workspaceId || files.length === 0) return;
     setIsUploading(true);
-    const formData = new FormData();
-    files.forEach((f) => formData.append('files', f));
-
     try {
-      const res = await fetch(`${api.baseUrl}/workspaces/${workspace.id}/assets`, {
-        method: 'POST',
-        body: formData,
-      });
-      if (res.ok) {
-        fetchAssets();
-      }
+      await api.uploadWorkspaceAssets(workspaceId, files);
+      await fetchAssets();
     } catch (err) {
       console.error('Upload failed', err);
     } finally {
       setIsUploading(false);
     }
-  };
+  }, [workspaceId, fetchAssets]);
 
-  const handleDrag = (e: React.DragEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
-    if (e.type === 'dragenter' || e.type === 'dragover') {
-      setDragActive(true);
-    } else if (e.type === 'dragleave') {
-      setDragActive(false);
-    }
-  };
-
-  const handleDrop = async (e: React.DragEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
-    setDragActive(false);
-
-    if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
-      await uploadFiles(Array.from(e.dataTransfer.files));
-    }
-  };
+  const { dragActive, handleDrag, handleDrop } = useFileDrop(uploadFiles);
 
   if (!workspace) {
     return (
       <aside className="notes is-inactive" style={style}>
         <div className="notes-placeholder">
           {onClose && (
-            <button className="icon-btn small panel-close-btn" onClick={onClose}>
+            <button className="icon-btn small panel-close-btn" onClick={onClose} type="button">
               <IconClose size={13} />
             </button>
           )}
@@ -100,7 +72,7 @@ export const AssetsPanel: React.FC<AssetsPanelProps> = ({
 
   return (
     <aside
-      className="notes" // reuse existing panel styling for now
+      className="notes"
       style={style}
       onDragEnter={handleDrag}
       onDragLeave={handleDrag}
@@ -134,9 +106,9 @@ export const AssetsPanel: React.FC<AssetsPanelProps> = ({
                 input.type = 'file';
                 input.multiple = true;
                 input.onchange = (e) => {
-                  const ev = e as unknown as React.ChangeEvent<HTMLInputElement>;
-                  if (ev.target.files && ev.target.files.length > 0) {
-                    uploadFiles(Array.from(ev.target.files));
+                  const target = e.target as HTMLInputElement;
+                  if (target.files && target.files.length > 0) {
+                    uploadFiles(Array.from(target.files));
                   }
                 };
                 input.click();
@@ -191,8 +163,6 @@ export const AssetsPanel: React.FC<AssetsPanelProps> = ({
             </ul>
           )}
         </div>
-
-        {isUploading && <div style={{ fontSize: '12px', color: 'var(--text-secondary)', marginTop: '8px' }}>Uploading...</div>}
       </div>
     </aside>
   );

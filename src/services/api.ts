@@ -1,4 +1,14 @@
-import type { Workspace, DocumentItem, NoteData, ChatMessage, ChatSession, AppSettings } from '../types';
+import type {
+  Workspace,
+  DocumentItem,
+  NoteData,
+  ChatMessage,
+  ChatSession,
+  AppSettings,
+  CompileResult,
+  WorkspaceAsset,
+} from '../types';
+import { parseSyncTex, type SyncTexData } from '../utils/synctex';
 
 // Production builds may serve the frontend from a different origin than the
 // API — VITE_API_URL lets the deploy point at it (dev falls back to the
@@ -7,6 +17,9 @@ const API_BASE = `${import.meta.env.VITE_API_URL ?? ''}/api`;
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 const LONG_TIMEOUT_MS = 120_000; // uploads + chat generation
+const SYNCTEX_CACHE_TTL_MS = 2_000;
+
+const synctexCache = new Map<string, { timestamp: number; data: SyncTexData }>();
 
 export class ApiError extends Error {
   status: number;
@@ -59,15 +72,8 @@ const json = (body: unknown): RequestInit => ({
 const enc = (s: string) => encodeURIComponent(s);
 
 export const api = {
-  baseUrl: API_BASE,
-  
   async getWorkspaces(): Promise<Workspace[]> {
-    try {
-      return await req<Workspace[]>('/workspaces');
-    } catch (err) {
-      console.warn('API getWorkspaces error, fallback to local', err);
-      return [];
-    }
+    return req<Workspace[]>('/workspaces');
   },
 
   async createWorkspace(name: string): Promise<Workspace> {
@@ -79,11 +85,41 @@ export const api = {
   },
 
   async updateWorkspace(id: string, updates: { name?: string; expanded?: boolean }): Promise<Workspace> {
-    return req<Workspace>(`/workspaces/${enc(id)}`, { ...json(updates), method: 'PUT' });
+    return req<Workspace>(`/workspaces/${enc(id)}`, json(updates));
   },
 
   async deleteWorkspace(id: string): Promise<void> {
     await req<void>(`/workspaces/${enc(id)}`, { method: 'DELETE' });
+  },
+
+  async getBibtex(workspaceId: string): Promise<string> {
+    const data = await req<{ content: string }>(`/workspaces/${enc(workspaceId)}/bibtex`);
+    return data.content || '';
+  },
+
+  async saveBibtex(workspaceId: string, content: string): Promise<void> {
+    await req<{ status: string }>(`/workspaces/${enc(workspaceId)}/bibtex`, json({ content }));
+  },
+
+  async getWorkspaceAssets(workspaceId: string): Promise<WorkspaceAsset[]> {
+    const data = await req<{ assets: WorkspaceAsset[] }>(`/workspaces/${enc(workspaceId)}/assets`);
+    return data.assets || [];
+  },
+
+  async uploadWorkspaceAssets(
+    workspaceId: string,
+    files: File[],
+    path: string = 'figures'
+  ): Promise<{ path: string; filename: string }[]> {
+    const formData = new FormData();
+    files.forEach((f) => formData.append('files', f));
+    formData.append('path', path);
+    const data = await req<{ status: string; uploaded: { path: string; filename: string }[] }>(
+      `/workspaces/${enc(workspaceId)}/assets`,
+      { method: 'POST', body: formData },
+      LONG_TIMEOUT_MS,
+    );
+    return data.uploaded || [];
   },
 
   async uploadDocument(
@@ -121,15 +157,19 @@ export const api = {
     );
   },
 
-  async compileDocument(docId: string): Promise<any> {
-    return req<any>(`/documents/${enc(docId)}/compile`, { method: 'POST' }, LONG_TIMEOUT_MS);
+  async compileDocument(docId: string): Promise<CompileResult> {
+    return req<CompileResult>(
+      `/documents/${enc(docId)}/compile`,
+      { method: 'POST' },
+      LONG_TIMEOUT_MS,
+    );
   },
 
   async updateDocument(
     id: string,
     updates: { note_title?: string; tag?: string; bookmarked?: boolean }
   ): Promise<DocumentItem> {
-    return req<DocumentItem>(`/documents/${enc(id)}`, { ...json(updates), method: 'PUT' });
+    return req<DocumentItem>(`/documents/${enc(id)}`, json(updates));
   },
 
   async deleteDocument(id: string): Promise<void> {
@@ -141,21 +181,49 @@ export const api = {
   },
 
   async saveNote(docId: string, content: string): Promise<NoteData> {
-    return req<NoteData>(`/documents/${enc(docId)}/note`, { ...json({ content }), method: 'PUT' });
+    return req<NoteData>(`/documents/${enc(docId)}/note`, json({ content }));
   },
 
   getDocumentFileUrl(docId: string): string {
     return `${API_BASE}/documents/${enc(docId)}/file`;
   },
 
+  invalidateSynctexCache(docId: string): void {
+    synctexCache.delete(docId);
+  },
+
+  async getSynctex(docId: string): Promise<SyncTexData | null> {
+    const cached = synctexCache.get(docId);
+    if (cached && Date.now() - cached.timestamp < SYNCTEX_CACHE_TTL_MS) {
+      return cached.data;
+    }
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), DEFAULT_TIMEOUT_MS);
+    try {
+      const res = await fetch(`${API_BASE}/documents/${enc(docId)}/synctex`, {
+        signal: ctrl.signal,
+      });
+      if (!res.ok) {
+        if (res.status !== 404) console.error('Failed to fetch SyncTeX map', res.status);
+        return null;
+      }
+      const text = await res.text();
+      if (!text) return null;
+      const data = parseSyncTex(text);
+      synctexCache.set(docId, { timestamp: Date.now(), data });
+      return data;
+    } catch (err) {
+      console.error('Error fetching SyncTeX:', err);
+      return null;
+    } finally {
+      clearTimeout(timer);
+    }
+  },
+
   // Chats are global sessions, independent of documents. A chat records an
   // origin document and each send may attach context documents.
   async getChats(): Promise<ChatSession[]> {
-    try {
-      return await req<ChatSession[]>('/chats');
-    } catch {
-      return [];
-    }
+    return req<ChatSession[]>('/chats');
   },
 
   async createChat(opts?: { title?: string; document_id?: string | null }): Promise<ChatSession> {
@@ -167,11 +235,7 @@ export const api = {
   },
 
   async getChatMessages(chatId: string): Promise<ChatMessage[]> {
-    try {
-      return await req<ChatMessage[]>(`/chats/${enc(chatId)}/messages`);
-    } catch {
-      return [];
-    }
+    return req<ChatMessage[]>(`/chats/${enc(chatId)}/messages`);
   },
 
   async sendChatMessage(chatId: string, message: string, documentIds: string[] = [], workspaceIds: string[] = []): Promise<ChatMessage> {

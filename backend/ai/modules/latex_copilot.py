@@ -1,32 +1,30 @@
 import re
 import dspy
-from ai.signatures import SafeLatexGenerator
+from ai.signatures import FixTectonicError, SafeLatexGenerator
 from ai.validators import has_balanced_environments
+from citations import sanitize_output
 
 MAX_RETRIES = 3
 
-def _strip_code_fences(code: str) -> str:
-    """Remove a leading ```latex / ``` opener and the trailing ``` fence, plus any leaked DSPy delimiters."""
-    if not code:
-        return ""
-    code = code.strip()
-    # Strip any trailing or internal DSPy delimiters e.g. [[ ## completed ## ]] or [[ ## ... ## ]]
-    code = re.sub(r"\[\[\s*##.*?##\s*\]*\]?", "", code).strip()
 
-    # If code contains markdown code fences, extract the enclosed block
-    fence_match = re.search(r"```(?:latex|tex)?\s*\n?(.*?)\n?```", code, re.DOTALL)
+def strip_code_fences(code: str) -> str:
+    """Remove markdown ```latex / ``` fences and leaked DSPy delimiters."""
+    cleaned = sanitize_output(code or "")
+    if not cleaned:
+        return ""
+
+    fence_match = re.search(r"```(?:latex|tex)?\s*\n?(.*?)\n?```", cleaned, re.DOTALL)
     if fence_match:
-        code = fence_match.group(1).strip()
+        cleaned = fence_match.group(1).strip()
     else:
         for prefix in ("```latex", "```tex", "```"):
-            if code.startswith(prefix):
-                code = code[len(prefix):].strip()
-        if code.endswith("```"):
-            code = code[:-3].strip()
+            if cleaned.startswith(prefix):
+                cleaned = cleaned[len(prefix):].strip()
+        if cleaned.endswith("```"):
+            cleaned = cleaned[:-3].strip()
 
-    # Final cleanup of any trailing delimiter
-    code = re.sub(r"\[\[\s*##.*?##\s*\]*\]?", "", code).strip()
-    return code
+    return sanitize_output(cleaned)
+
 
 class SafeLatexModule(dspy.Module):
     def __init__(self):
@@ -41,7 +39,7 @@ class SafeLatexModule(dspy.Module):
         code = ""
         for _attempt in range(MAX_RETRIES):
             result = self.generator(context=context, instruction=instruction)
-            code = _strip_code_fences(result.latex_code)
+            code = strip_code_fences(result.latex_code)
             result.latex_code = code
 
             if has_balanced_environments(code):
@@ -56,4 +54,16 @@ class SafeLatexModule(dspy.Module):
 
         # Still invalid after MAX_RETRIES: return the last attempt with fences
         # already stripped (callers warn the user it may not compile).
+        return result
+
+
+class FixTectonicModule(dspy.Module):
+    def __init__(self):
+        super().__init__()
+        self.fixer = dspy.ChainOfThought(FixTectonicError)
+
+    def forward(self, error_log: str, latex_context: str):
+        result = self.fixer(error_log=error_log, latex_context=latex_context)
+        result.corrected_code = strip_code_fences(getattr(result, "corrected_code", "") or "")
+        result.explanation = sanitize_output(getattr(result, "explanation", "") or "")
         return result

@@ -1,6 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import type { AppSettings } from '../types';
+import { DEFAULT_SETTINGS, GEMINI_MODELS } from '../config/defaults';
 import { api } from '../services/api';
+import { ConfirmModal } from './Modals';
 import {
   IconClose,
   IconSettings,
@@ -23,13 +25,6 @@ interface SettingsModalProps {
 
 type SettingsTab = 'profile' | 'ai' | 'editor' | 'system';
 
-const GEMINI_MODELS = [
-  { id: 'gemini-3.5-flash-lite', name: 'Gemini 3.5 Flash Lite', desc: 'Default · Ultra fast & lightweight (Free tier)' },
-  { id: 'gemini-3.5-flash', name: 'Gemini 3.5 Flash', desc: 'High-speed multimodal reasoning (Free tier)' },
-  { id: 'gemma-4-31b-it', name: 'Gemma 4 31B IT', desc: 'High-capacity open instruction model (Free tier)' },
-  { id: 'gemma-4-26b-a4b-it', name: 'Gemma 4 26B A4B IT', desc: 'Architecture-optimized instruction model (Free tier)' },
-];
-
 export const SettingsModal: React.FC<SettingsModalProps> = ({
   isOpen,
   onClose,
@@ -42,20 +37,20 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   );
 
   // Form states
-  const [userName, setUserName] = useState(settings.user_name || 'Researcher');
-  const [userAffiliation, setUserAffiliation] = useState(settings.user_affiliation || '');
+  const [userName, setUserName] = useState(settings.user_name || DEFAULT_SETTINGS.user_name);
+  const [userAffiliation, setUserAffiliation] = useState(settings.user_affiliation || DEFAULT_SETTINGS.user_affiliation);
   const [geminiModel, setGeminiModel] = useState(() => {
     const found = GEMINI_MODELS.find((m) => m.id === settings.gemini_model);
-    return found ? found.id : 'gemini-3.5-flash-lite';
+    return found ? found.id : DEFAULT_SETTINGS.gemini_model;
   });
   const [apiKeyInput, setApiKeyInput] = useState('');
   const [showApiKey, setShowApiKey] = useState(false);
-  const [aiTemperature, setAiTemperature] = useState(settings.ai_temperature ?? 0.7);
-  const [aiPersona, setAiPersona] = useState(settings.ai_persona || 'academic');
-  const [autoCompileDelay, setAutoCompileDelay] = useState(settings.auto_compile_delay ?? 1500);
-  const [editorFontSize, setEditorFontSize] = useState(settings.editor_font_size ?? 13);
-  const [editorWordWrap, setEditorWordWrap] = useState(settings.editor_word_wrap ?? true);
-  const [editorLineNumbers, setEditorLineNumbers] = useState(settings.editor_line_numbers ?? true);
+  const [aiTemperature, setAiTemperature] = useState(settings.ai_temperature ?? DEFAULT_SETTINGS.ai_temperature);
+  const [aiPersona, setAiPersona] = useState(settings.ai_persona || DEFAULT_SETTINGS.ai_persona);
+  const [autoCompileDelay, setAutoCompileDelay] = useState(settings.auto_compile_delay ?? DEFAULT_SETTINGS.auto_compile_delay);
+  const [editorFontSize, setEditorFontSize] = useState(settings.editor_font_size ?? DEFAULT_SETTINGS.editor_font_size);
+  const [editorWordWrap, setEditorWordWrap] = useState(settings.editor_word_wrap ?? DEFAULT_SETTINGS.editor_word_wrap);
+  const [editorLineNumbers, setEditorLineNumbers] = useState(settings.editor_line_numbers ?? DEFAULT_SETTINGS.editor_line_numbers);
 
   // Status states
   const [isTestingKey, setIsTestingKey] = useState(false);
@@ -63,23 +58,29 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const [isSaving, setIsSaving] = useState(false);
   const [saveSuccess, setSaveSuccess] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
+  const [confirmResetOpen, setConfirmResetOpen] = useState(false);
+
+  const applyPreferencesToForm = (src: AppSettings) => {
+    setUserName(src.user_name || DEFAULT_SETTINGS.user_name);
+    setUserAffiliation(src.user_affiliation || DEFAULT_SETTINGS.user_affiliation);
+    const found = GEMINI_MODELS.find((m) => m.id === src.gemini_model);
+    setGeminiModel(found ? found.id : DEFAULT_SETTINGS.gemini_model);
+    setAiTemperature(src.ai_temperature ?? DEFAULT_SETTINGS.ai_temperature);
+    setAiPersona(src.ai_persona || DEFAULT_SETTINGS.ai_persona);
+    setAutoCompileDelay(src.auto_compile_delay ?? DEFAULT_SETTINGS.auto_compile_delay);
+    setEditorFontSize(src.editor_font_size ?? DEFAULT_SETTINGS.editor_font_size);
+    setEditorWordWrap(src.editor_word_wrap ?? DEFAULT_SETTINGS.editor_word_wrap);
+    setEditorLineNumbers(src.editor_line_numbers ?? DEFAULT_SETTINGS.editor_line_numbers);
+  };
 
   useEffect(() => {
     if (isOpen) {
-      setUserName(settings.user_name || 'Researcher');
-      setUserAffiliation(settings.user_affiliation || '');
-      const found = GEMINI_MODELS.find((m) => m.id === settings.gemini_model);
-      setGeminiModel(found ? found.id : 'gemini-3.5-flash-lite');
+      applyPreferencesToForm(settings);
       setApiKeyInput('');
-      setAiTemperature(settings.ai_temperature ?? 0.7);
-      setAiPersona(settings.ai_persona || 'academic');
-      setAutoCompileDelay(settings.auto_compile_delay ?? 1500);
-      setEditorFontSize(settings.editor_font_size ?? 13);
-      setEditorWordWrap(settings.editor_word_wrap ?? true);
-      setEditorLineNumbers(settings.editor_line_numbers ?? true);
       setTestResult(null);
       setSaveSuccess(false);
       setSaveError(null);
+      setConfirmResetOpen(false);
       if (isFirstRun && !settings.gemini_api_key_set) {
         setActiveTab('ai');
       }
@@ -87,13 +88,13 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   }, [isOpen, settings, isFirstRun]);
 
   useEffect(() => {
-    if (!isOpen) return;
+    if (!isOpen || confirmResetOpen) return;
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') onClose();
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [isOpen, onClose]);
+  }, [isOpen, confirmResetOpen, onClose]);
 
   if (!isOpen) return null;
 
@@ -120,7 +121,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     setSaveError(null);
     try {
       const payload: Partial<AppSettings> = {
-        user_name: userName.trim() || 'Researcher',
+        user_name: userName.trim() || DEFAULT_SETTINGS.user_name,
         user_affiliation: userAffiliation.trim(),
         gemini_model: geminiModel,
         ai_temperature: Number(aiTemperature),
@@ -418,7 +419,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                     id="settingsTemperature"
                     type="range"
                     min="0"
-                    max="1.5"
+                    max="2"
                     step="0.1"
                     value={aiTemperature}
                     onChange={(e) => setAiTemperature(parseFloat(e.target.value))}
@@ -531,16 +532,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                     <button
                       type="button"
                       className="modal-btn secondary"
-                      onClick={() => {
-                        if (confirm('Reset preferences to defaults? Workspaces and documents will not be affected.')) {
-                          setUserName('Researcher');
-                          setUserAffiliation('');
-                          setGeminiModel('gemini-3.5-flash-lite');
-                          setAiTemperature(0.7);
-                          setAutoCompileDelay(1500);
-                          setEditorFontSize(13);
-                        }
-                      }}
+                      onClick={() => setConfirmResetOpen(true)}
                     >
                       Restore Default Preferences
                     </button>
@@ -550,6 +542,18 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             )}
           </div>
         </div>
+
+        <ConfirmModal
+          open={confirmResetOpen}
+          title="Restore Default Preferences"
+          message="Reset preferences to defaults? Workspaces and documents will not be affected."
+          confirmLabel="Restore Defaults"
+          onCancel={() => setConfirmResetOpen(false)}
+          onConfirm={() => {
+            applyPreferencesToForm(DEFAULT_SETTINGS);
+            setConfirmResetOpen(false);
+          }}
+        />
 
         {/* Modal Actions */}
         <div className="modal-actions" style={{ padding: '12px 18px', borderTop: '1px solid var(--border-subtle)', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>

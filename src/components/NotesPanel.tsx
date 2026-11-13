@@ -1,5 +1,8 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useCallback } from 'react';
 import type { DocumentItem } from '../types';
+import { getDocDisplayName, cleanDocName, isLatexDoc } from '../utils/document';
+import { toMs, triggerDownloadBlob } from '../utils/dom';
+import { useOutsideClick } from '../hooks/useOutsideClick';
 import { LiveMarkdownEditor } from './LiveMarkdownEditor';
 import { CodeMirrorLatexEditor } from './CodeMirrorLatexEditor';
 import {
@@ -18,6 +21,8 @@ interface NotesPanelProps {
   style?: React.CSSProperties;
   saveStatus?: 'saved' | 'saving' | 'idle' | 'error';
   lastSavedTime?: string | null;
+  editorWordWrap?: boolean;
+  editorLineNumbers?: boolean;
   onNoteChange: (content: string) => void;
   onManualSave?: (content?: string) => void;
   onTagChange: (newTag: string) => void;
@@ -43,23 +48,13 @@ function tagClass(tag?: string): string {
 }
 
 function getDocDate(d?: DocumentItem | null): string {
-  if (d?.added_at) {
-    const v = d.added_at;
-    const ms = Number.isFinite(v) ? (v > 1e11 ? v : v * 1000) : Date.now();
-    return new Date(ms).toLocaleDateString('en-US', {
-      month: 'short',
-      day: 'numeric',
-      year: 'numeric',
-    });
-  }
-  return new Date().toLocaleDateString('en-US', {
+  const ms = d?.added_at && Number.isFinite(d.added_at) ? toMs(d.added_at) : Date.now();
+  return new Date(ms).toLocaleDateString('en-US', {
     month: 'short',
     day: 'numeric',
     year: 'numeric',
   });
 }
-
-const baseName = (n?: string) => (n || '').replace(/\.pdf$/i, '');
 
 const NotesPanelInner: React.FC<NotesPanelProps> = ({
   doc,
@@ -67,6 +62,8 @@ const NotesPanelInner: React.FC<NotesPanelProps> = ({
   style,
   saveStatus = 'idle',
   lastSavedTime,
+  editorWordWrap = true,
+  editorLineNumbers = true,
   onNoteChange,
   onManualSave,
   onTagChange,
@@ -79,22 +76,11 @@ const NotesPanelInner: React.FC<NotesPanelProps> = ({
   const tagMenuRef = useRef<HTMLDivElement>(null);
 
   const isInactive = !doc;
+  const latexDoc = isLatexDoc(doc);
+  const currentTitle = doc ? getDocDisplayName(doc) : '';
 
-  const externalTitle = doc ? doc.note_title || baseName(doc.name) : '';
-  const currentTitle = externalTitle;
-
-  // Close tag menu on outside click
-  useEffect(() => {
-    const handleClickOutside = (e: MouseEvent) => {
-      if (tagMenuRef.current && !tagMenuRef.current.contains(e.target as Node)) {
-        setIsTagMenuOpen(false);
-      }
-    };
-    if (isTagMenuOpen) {
-      document.addEventListener('mousedown', handleClickOutside);
-    }
-    return () => document.removeEventListener('mousedown', handleClickOutside);
-  }, [isTagMenuOpen]);
+  const closeTagMenu = useCallback(() => setIsTagMenuOpen(false), []);
+  useOutsideClick(tagMenuRef, isTagMenuOpen, closeTagMenu);
 
   const handleSelectTag = (tag: string) => {
     const clean = tag.trim().slice(0, MAX_TAG_LEN);
@@ -117,21 +103,11 @@ const NotesPanelInner: React.FC<NotesPanelProps> = ({
 
   const handleDownloadNote = () => {
     if (!doc) return;
-    const isLatex = doc.doc_type === 'latex';
-    const ext = isLatex ? '.tex' : '.md';
-    const mime = isLatex ? 'text/x-tex;charset=utf-8' : 'text/markdown;charset=utf-8';
-    const base = currentTitle.trim().replace(/\.tex$/i, '').replace(/\.md$/i, '') || 'document';
+    const ext = latexDoc ? '.tex' : '.md';
+    const mime = latexDoc ? 'text/x-tex;charset=utf-8' : 'text/markdown;charset=utf-8';
+    const base = cleanDocName(currentTitle).trim() || 'document';
     const safeName = base.replace(/[\\/:*?"<>|]/g, '').slice(0, 100) || 'document';
-    const blob = new Blob([noteContent], { type: mime });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `${safeName}${ext}`;
-    // Appended (not detached) so Firefox/Safari honor the click.
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    setTimeout(() => URL.revokeObjectURL(url), 10_000);
+    triggerDownloadBlob(noteContent, `${safeName}${ext}`, mime);
     // Persist the same snapshot that was downloaded.
     onManualSave?.(noteContent);
   };
@@ -159,7 +135,7 @@ const NotesPanelInner: React.FC<NotesPanelProps> = ({
           <IconPencil size={36} />
         </div>
         <h3>Notes</h3>
-        <p>Select a document to start writing markdown notes.</p>
+        <p>Select a document to start writing markdown notes or LaTeX.</p>
       </div>
 
       <div className="notes-content">
@@ -168,7 +144,7 @@ const NotesPanelInner: React.FC<NotesPanelProps> = ({
             {dragHandle && <span className="drag-handle-wrapper" style={{ flexShrink: 0 }}>{dragHandle}</span>}
             <div className="notes-meta" style={{ minWidth: 0, flex: 1, overflow: 'hidden' }}>
               <div className="crumbs" style={{ minWidth: 0, overflow: 'hidden', whiteSpace: 'nowrap', textOverflow: 'ellipsis', display: 'flex', alignItems: 'center', gap: '4px' }}>
-                <span style={{ flexShrink: 0 }}>{doc?.doc_type === 'latex' ? 'LaTeX' : 'Notes'}</span>
+                <span style={{ flexShrink: 0 }}>{latexDoc ? 'LaTeX' : 'Notes'}</span>
                 <span className="crumb-sep" style={{ flexShrink: 0 }}>/</span>
                 <b id="crumbLabel" className="crumb-title" title={currentTitle} style={{ fontSize: '14px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', minWidth: 0, flex: 1 }}>
                   {currentTitle || '—'}
@@ -190,8 +166,8 @@ const NotesPanelInner: React.FC<NotesPanelProps> = ({
             <button
               className="icon-btn small"
               id="downloadNoteBtn"
-              title="Download note as Markdown"
-              aria-label="Download note as Markdown"
+              title={latexDoc ? 'Download LaTeX source (.tex)' : 'Download note as Markdown'}
+              aria-label={latexDoc ? 'Download LaTeX source' : 'Download note as Markdown'}
               onClick={handleDownloadNote}
               type="button"
             >
@@ -277,11 +253,11 @@ const NotesPanelInner: React.FC<NotesPanelProps> = ({
               {saveStatus === 'saving' ? (
                 <span>Saving…</span>
               ) : saveStatus === 'error' ? (
-                <span>Build failed</span>
+                <span>{latexDoc ? 'Build failed' : 'Save failed'}</span>
               ) : (
                 <>
                   <IconCheck size={11} />
-                  <span>Saved {lastSavedTime ? ' ' + lastSavedTime : ''}</span>
+                  <span>Saved{lastSavedTime ? ' ' + lastSavedTime : ''}</span>
                 </>
               )}
             </span>
@@ -292,11 +268,13 @@ const NotesPanelInner: React.FC<NotesPanelProps> = ({
           </span>
         </div>
 
-        {doc && doc.doc_type === 'latex' ? (
+        {doc && latexDoc ? (
           <CodeMirrorLatexEditor
             docId={doc.id}
             workspaceId={doc.workspace_id}
             content={noteContent}
+            wordWrap={editorWordWrap}
+            lineNumbers={editorLineNumbers}
             onChange={onNoteChange}
             onManualSave={onManualSave}
             onWordCountChange={setWordCount}
@@ -314,27 +292,4 @@ const NotesPanelInner: React.FC<NotesPanelProps> = ({
   );
 };
 
-export const NotesPanel: React.FC<NotesPanelProps> = React.memo(
-  NotesPanelInner,
-  (prev, next) => {
-    const a = prev.doc;
-    const b = next.doc;
-    if (a?.id !== b?.id) return false;
-    if ((a?.note_title || '') !== (b?.note_title || '')) return false;
-    if ((a?.tag || '') !== (b?.tag || '')) return false;
-    if ((a?.name || '') !== (b?.name || '')) return false;
-    if (!!a?.has_file !== !!b?.has_file) return false;
-    if ((a?.file ?? null) !== (b?.file ?? null)) return false;
-    return (
-      prev.noteContent === next.noteContent &&
-      prev.saveStatus === next.saveStatus &&
-      prev.lastSavedTime === next.lastSavedTime &&
-      prev.style === next.style &&
-      prev.onNoteChange === next.onNoteChange &&
-      prev.onManualSave === next.onManualSave &&
-      prev.onTagChange === next.onTagChange &&
-      prev.onClose === next.onClose &&
-      prev.dragHandle === next.dragHandle
-    );
-  }
-);
+export const NotesPanel: React.FC<NotesPanelProps> = React.memo(NotesPanelInner);

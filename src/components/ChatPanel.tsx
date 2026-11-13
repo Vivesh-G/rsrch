@@ -5,11 +5,15 @@ import remarkMath from 'remark-math';
 import rehypeKatex from 'rehype-katex';
 import 'katex/dist/katex.min.css';
 import type { ChatMessage, ChatSession, DocumentItem } from '../types';
+import { MAX_ATTACHED_DOCS, MAX_CHAT_MESSAGE_CHARS } from '../config/defaults';
 import { api, ApiError } from '../services/api';
+import { getDocDisplayName, isLatexDoc } from '../utils/document';
+import { PAGE_CITATION_RE, extractCitationPages, stripLeakedDspyMarkers } from '../utils/citations';
+import { toMs } from '../utils/dom';
+import { emitEvent, onEvent } from '../utils/events';
+import { STORAGE_KEYS, readStoredJson, removeStored, writeStoredJson } from '../utils/storage';
+import { useOutsideClick } from '../hooks/useOutsideClick';
 import { IconPlus, IconClose, IconTrash, IconDoc, IconHistory, IconSparkles, IconCopy, IconCheck } from './Icons';
-
-/** Mirrors MAX_ATTACHED_DOCS in backend/server.py. */
-const MAX_ATTACHED_DOCS = 6;
 
 interface ChatPanelProps {
   /** Currently open document (for context attach) — panel is NOT keyed by it. */
@@ -29,24 +33,6 @@ interface ChatPanelProps {
   onClose?: () => void;
 }
 
-export const PERSISTED_CHAT_KEY = 'rschr-chat-id';
-
-const readStored = <T,>(key: string, fallback: T): T => {
-  try {
-    const raw = localStorage.getItem(key);
-    if (raw == null) return fallback;
-    return JSON.parse(raw) as T;
-  } catch {
-    return fallback;
-  }
-};
-
-const toMs = (ts: number): number => {
-  if (!Number.isFinite(ts)) return Date.now();
-  // Backend stores seconds (time.time()); accept ms defensively.
-  return ts > 1e11 ? ts : ts * 1000;
-};
-
 const fmtWhen = (ts: number) =>
   new Date(toMs(ts)).toLocaleString('en-US', {
     month: 'short',
@@ -55,49 +41,20 @@ const fmtWhen = (ts: number) =>
     minute: '2-digit',
   });
 
-/**
- * Citation marker forms the backend understands: [p. 3], [p. 3, p. 7],
- * [pp. 10-12], [pp. 10–12]. Must stay in sync with _PAGE_CITATION_RE in
- * backend/server.py — otherwise markers render as raw text.
- */
-const CITATION_MARKER_RE = /\[p{1,2}s?\.\s*\d+(?:\s*[-\u2013]\s*\d+)?(?:\s*,\s*(?:p{1,2}s?\.\s*)?\d+(?:\s*[-\u2013]\s*\d+)?)*\]/g;
-
-/** Pages referenced by one marker, expanding ranges like `10-12` or `10–12`.
- *  The range separator must accept the en dash (\u2013) the backend's
- *  `_CITATION_BODY` allows — otherwise `[pp. 10–12]` expands only the
- *  endpoints (10, 12) instead of every page (10, 11, 12). */
-function pagesFromMarker(marker: string): number[] {
-    const pages = new Set<number>();
-    for (const part of marker.replace(/[[\]]/g, '').split(',')) {
-        const nums = part.match(/\d+/g)?.map(Number) ?? [];
-        if (nums.length === 2 && /[-\u2013]\s*\d/.test(part)) {
-            const [lo, hi] = nums[0] <= nums[1] ? nums : [nums[1], nums[0]];
-            if (lo >= 1 && hi - lo <= 500) {
-                for (let p = lo; p <= hi; p++) pages.add(p);
-                continue;
-            }
-        }
-        nums.forEach((p) => pages.add(p));
-    }
-    return [...pages].filter((p) => p >= 1).sort((a, b) => a - b);
-}
-
-const scrollToPage = (page: number) => {
-    window.dispatchEvent(new CustomEvent('rsrch:scroll-to-page', { detail: { page } }));
-};
+const scrollToPage = (page: number) => emitEvent('scroll-to-page', { page });
 
 /** Replace `[p. N]` markers in rendered markdown text with clickable badges. */
 function transformCitations(children: React.ReactNode): React.ReactNode {
     return React.Children.map(children, (child) => {
-        if (typeof child !== 'string' || !CITATION_MARKER_RE.test(child)) return child;
+        if (typeof child !== 'string' || !PAGE_CITATION_RE.test(child)) return child;
         // Regex is global — reset lastIndex before reusing it.
-        CITATION_MARKER_RE.lastIndex = 0;
+        PAGE_CITATION_RE.lastIndex = 0;
         const out: React.ReactNode[] = [];
         let cursor = 0;
-        for (const match of child.matchAll(CITATION_MARKER_RE)) {
+        for (const match of child.matchAll(PAGE_CITATION_RE)) {
             const start = match.index ?? 0;
             if (start > cursor) out.push(child.slice(cursor, start));
-            for (const page of pagesFromMarker(match[0])) {
+            for (const page of extractCitationPages(match[0])) {
                 out.push(
                     <button key={`cite-${start}-${page}`} className="citation-badge"
                         onClick={() => scrollToPage(page)}
@@ -117,14 +74,6 @@ function transformCitations(children: React.ReactNode): React.ReactNode {
         );
     });
 }
-
-const cleanChatContent = (raw: string): string => {
-  if (!raw) return '';
-  return raw
-    .replace(/\[\[\s*##.*?##\s*\]*\]?/g, '')
-    .replace(/\[\[\s*##\s*completed\b.*/gi, '')
-    .trim();
-};
 
 const LatexCodeBlock: React.FC<{
   code: string;
@@ -158,7 +107,7 @@ const LatexCodeBlock: React.FC<{
           </button>
           <button
             className="code-action-btn"
-            onClick={() => window.dispatchEvent(new CustomEvent('rsrch:latex-insert', { detail: { code } }))}
+            onClick={() => emitEvent('latex-insert', { code })}
             title="Insert at caret position"
             type="button"
           >
@@ -167,7 +116,7 @@ const LatexCodeBlock: React.FC<{
           </button>
           <button
             className="code-action-btn primary"
-            onClick={() => window.dispatchEvent(new CustomEvent('rsrch:latex-apply', { detail: { code } }))}
+            onClick={() => emitEvent('latex-apply', { code })}
             title="Replace currently selected text"
             type="button"
           >
@@ -202,7 +151,7 @@ const MemoizedMessageList = React.memo(({ messages, isWaiting }: { messages: Cha
               components={{
                 p: ({children}) => <p>{transformCitations(children)}</p>,
                 li: ({children}) => <li>{transformCitations(children)}</li>,
-                code({ node, className, children, ...props }: any) {
+                code({ className, children, ...props }: any) {
                   const match = /language-(\w+)/.exec(className || '');
                   const lang = match?.[1]?.toLowerCase();
                   const isLatex = lang === 'latex' || lang === 'tex';
@@ -227,16 +176,15 @@ const MemoizedMessageList = React.memo(({ messages, isWaiting }: { messages: Cha
                 }
               }}
             >
-              {cleanChatContent(msg.content)}
+              {stripLeakedDspyMarkers(msg.content)}
             </ReactMarkdown>
             {(() => {
                 // Pages already rendered as inline badges must not be repeated
                 // in the summary chip row.
                 const inline = new Set<number>();
-                for (const m of msg.content.matchAll(CITATION_MARKER_RE)) {
-                    pagesFromMarker(m[0]).forEach((p) => inline.add(p));
+                for (const m of msg.content.matchAll(PAGE_CITATION_RE)) {
+                    extractCitationPages(m[0]).forEach((p) => inline.add(p));
                 }
-                CITATION_MARKER_RE.lastIndex = 0;
                 const extra = (msg.cited_pages ?? []).filter((p) => !inline.has(p));
                 if (extra.length === 0) return null;
                 return (
@@ -299,32 +247,15 @@ const ChatPanelInner = ({ activeDocId, activeDocTitle, resolveDocTitle, listCont
     };
   }, []);
 
-  useEffect(() => {
-    if (!pickerOpen) return;
-    const onDown = (e: MouseEvent) => {
-      if (pickerRef.current && !pickerRef.current.contains(e.target as Node)) {
-        setPickerOpen(false);
-      }
-    };
-    document.addEventListener('mousedown', onDown);
-    return () => document.removeEventListener('mousedown', onDown);
-  }, [pickerOpen]);
+  const closePicker = useCallback(() => setPickerOpen(false), []);
+  useOutsideClick(pickerRef, pickerOpen, closePicker);
 
   useEffect(() => {
-    const handleAppend = (e: Event) => {
-      const detail = (e as CustomEvent).detail;
-      if (detail && detail.text) {
-        setInput((prev) => prev ? prev + '\n\n' + detail.text : detail.text);
+    return onEvent('chat-append', (detail) => {
+      if (detail?.text) {
+        setInput((prev) => (prev ? `${prev}\n\n${detail.text}` : detail.text));
       }
-    };
-    
-    // We can't call sendMessage directly here since it's defined below,
-    // so we set the input and trigger a custom submit event or just define it in a way we can reach it.
-    // Instead of doing it here, we'll do it via a flag or just handle it below.
-    window.addEventListener('rsrch:chat-append', handleAppend);
-    return () => {
-      window.removeEventListener('rsrch:chat-append', handleAppend);
-    };
+    });
   }, []);
 
   const refreshChats = useCallback(async (): Promise<ChatSession[]> => {
@@ -344,7 +275,7 @@ const ChatPanelInner = ({ activeDocId, activeDocTitle, resolveDocTitle, listCont
     let cancelled = false;
     void refreshChats().then((list) => {
       if (cancelled) return;
-      const stored = readStored<string | null>(PERSISTED_CHAT_KEY, null);
+      const stored = readStoredJson<string | null>(STORAGE_KEYS.activeChatId, null);
       const found = stored ? list.find((c) => c.id === stored) : undefined;
       if (found) void openChatRef.current(found);
     });
@@ -355,10 +286,8 @@ const ChatPanelInner = ({ activeDocId, activeDocTitle, resolveDocTitle, listCont
 
   // Persist the open chat (null = blank draft) for refresh-restore.
   useEffect(() => {
-    try {
-      if (activeChatId) localStorage.setItem(PERSISTED_CHAT_KEY, JSON.stringify(activeChatId));
-      else localStorage.removeItem(PERSISTED_CHAT_KEY);
-    } catch {}
+    if (activeChatId) writeStoredJson(STORAGE_KEYS.activeChatId, activeChatId);
+    else removeStored(STORAGE_KEYS.activeChatId);
   }, [activeChatId]);
 
   const scrollToBottom = useCallback(() => {
@@ -449,7 +378,7 @@ const ChatPanelInner = ({ activeDocId, activeDocTitle, resolveDocTitle, listCont
     const textToSend = overrideText !== undefined ? overrideText : input;
     if (!textToSend.trim() || isWaiting) return;
 
-    const text = textToSend.trim().slice(0, 4000);
+    const text = textToSend.trim().slice(0, MAX_CHAT_MESSAGE_CHARS);
     const userMessage: ChatMessage = {
       role: 'user',
       content: text,
@@ -520,11 +449,12 @@ const ChatPanelInner = ({ activeDocId, activeDocTitle, resolveDocTitle, listCont
   const headerTitle = activeChat ? activeChat.title : 'New chat';
 
   // Context picker list: current workspace PDF/TeX docs, minus attached, filtered.
+  const contextDocsSnapshot = listContextDocs();
   const pickerFilter = pickerQuery.trim().toLowerCase();
-  const pickerDocs = (pickerOpen ? listContextDocs() : []).filter(
+  const pickerDocs = (pickerOpen ? contextDocsSnapshot : []).filter(
     (d) =>
       !attachedIds.includes(d.id) &&
-      (!pickerFilter || (d.note_title || d.name).toLowerCase().includes(pickerFilter))
+      (!pickerFilter || getDocDisplayName(d).toLowerCase().includes(pickerFilter))
   );
   const wsAlreadyAttached = !activeWorkspaceId || attachedWs.some((w) => w.id === activeWorkspaceId);
   // Hard cap so the picker can never build a request the API 422s on.
@@ -540,8 +470,8 @@ const ChatPanelInner = ({ activeDocId, activeDocTitle, resolveDocTitle, listCont
   // Whether any LaTeX doc is in play, so the quick-action chips match the
   // active context. Must use doc_type — titles don't carry the extension.
   const hasLatexContext =
-    (activeDocId ? listContextDocs().find((d) => d.id === activeDocId)?.doc_type === 'latex' : false) ||
-    attachedIds.some((id) => listContextDocs().find((d) => d.id === id)?.doc_type === 'latex');
+    isLatexDoc(activeDocId ? contextDocsSnapshot.find((d) => d.id === activeDocId) : null) ||
+    attachedIds.some((id) => isLatexDoc(contextDocsSnapshot.find((d) => d.id === id)));
 
   return (
     <aside className="chat-panel" id="chatPanel" style={style}>
@@ -658,7 +588,7 @@ const ChatPanelInner = ({ activeDocId, activeDocTitle, resolveDocTitle, listCont
                             setAttachedWs((prev) =>
                               prev.some((w) => w.id === activeWorkspaceId)
                                 ? prev
-                                : [...prev, { id: activeWorkspaceId, name: activeWorkspaceName ?? 'Workspace' }]
+                                : [...prev, { id: activeWorkspaceId, name: activeWorkspaceName }]
                             );
                           }
                           setPickerOpen(false);
@@ -681,20 +611,23 @@ const ChatPanelInner = ({ activeDocId, activeDocTitle, resolveDocTitle, listCont
                         Context limit reached ({attachedCount}/{MAX_ATTACHED_DOCS}). Remove a document to add another.
                       </div>
                     ) : pickerDocs.length === 0 ? (
-                      <div className="context-picker-empty">No other PDFs in this workspace.</div>
+                      <div className="context-picker-empty">No other documents in this workspace.</div>
                     ) : (
-                      pickerDocs.map((d) => (
-                        <button
-                          key={d.id}
-                          className="context-picker-item"
-                          onClick={() => { attachDoc(d.id); setPickerOpen(false); }}
-                          title={`Attach "${d.note_title || d.name}" as context`}
-                          type="button"
-                        >
-                          <IconDoc size={11} />
-                          <span>{d.note_title || d.name}</span>
-                        </button>
-                      ))
+                      pickerDocs.map((d) => {
+                        const title = getDocDisplayName(d);
+                        return (
+                          <button
+                            key={d.id}
+                            className="context-picker-item"
+                            onClick={() => { attachDoc(d.id); setPickerOpen(false); }}
+                            title={`Attach "${title}" as context`}
+                            type="button"
+                          >
+                            <IconDoc size={11} />
+                            <span>{title}</span>
+                          </button>
+                        );
+                      })
                     )}
                   </div>
                 )}
@@ -740,19 +673,18 @@ const ChatPanelInner = ({ activeDocId, activeDocTitle, resolveDocTitle, listCont
                 aria-label="Chat message"
                 value={input}
                 onChange={(e) => {
-                  setInput(e.target.value.slice(0, 4000));
+                  setInput(e.target.value.slice(0, MAX_CHAT_MESSAGE_CHARS));
                   e.target.style.height = 'auto';
                   e.target.style.height = `${Math.min(e.target.scrollHeight, 150)}px`;
                 }}
                 onKeyDown={(e) => {
-                  // Enter sends; Shift+Enter inserts a newline.
                   if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
                     e.preventDefault();
                     void handleSend();
                   }
                 }}
                 rows={1}
-                maxLength={4000}
+                maxLength={MAX_CHAT_MESSAGE_CHARS}
                 disabled={isWaiting}
                 style={{ resize: 'none', overflowY: 'auto' }}
               />
@@ -767,21 +699,4 @@ const ChatPanelInner = ({ activeDocId, activeDocTitle, resolveDocTitle, listCont
   );
 };
 
-export const ChatPanel = React.memo(
-  ChatPanelInner,
-  (prev, next) => {
-    return (
-      prev.activeDocId === next.activeDocId &&
-      prev.activeDocTitle === next.activeDocTitle &&
-      prev.resolveDocTitle === next.resolveDocTitle &&
-      prev.listContextDocs === next.listContextDocs &&
-      prev.activeWorkspaceId === next.activeWorkspaceId &&
-      prev.activeWorkspaceName === next.activeWorkspaceName &&
-      prev.pendingSend === next.pendingSend &&
-      prev.onPendingSendConsumed === next.onPendingSendConsumed &&
-      prev.style === next.style &&
-      prev.onClose === next.onClose &&
-      prev.dragHandle === next.dragHandle
-    );
-  }
-);
+export const ChatPanel = React.memo(ChatPanelInner);

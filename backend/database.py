@@ -1,5 +1,7 @@
 import json
+import logging
 import os
+import re
 import time
 import uuid
 from typing import Iterable, List, Optional, Dict, Any
@@ -8,13 +10,11 @@ import aiosqlite
 
 from config import settings
 
+logger = logging.getLogger("rsrch.db")
+
 # Paths come from config.settings (single load, exe-friendly via
 # RSRCH_DATA_DIR). Kept as module-level str aliases for backward compat.
-DB_DIR = str(settings.data_dir)
 DB_PATH = str(settings.db_path)
-PDF_DIR = str(settings.pdf_dir)
-
-settings.ensure_dirs()
 
 STARTER_NOTE_TEMPLATE = """## Getting started
 
@@ -39,12 +39,13 @@ async def get_db():
         try:
             await db.execute("PRAGMA journal_mode = WAL;")
             await db.execute("PRAGMA busy_timeout = 30000;")
-        except Exception:
+        except aiosqlite.Error:
             pass
         yield db
 
 
 async def init_db():
+    os.makedirs(os.path.dirname(DB_PATH) or ".", exist_ok=True)
     async with get_db() as db:
         await db.execute("""
             CREATE TABLE IF NOT EXISTS workspaces (
@@ -79,12 +80,12 @@ async def init_db():
         """)
         try:
             await db.execute("ALTER TABLE documents ADD COLUMN extracted_text TEXT DEFAULT ''")
-        except Exception:
+        except aiosqlite.OperationalError:
             pass
 
         try:
             await db.execute("ALTER TABLE documents ADD COLUMN doc_type TEXT DEFAULT 'pdf'")
-        except Exception:
+        except aiosqlite.OperationalError:
             pass
 
         await db.execute("""
@@ -159,9 +160,6 @@ async def init_db():
             "CREATE INDEX IF NOT EXISTS idx_documents_workspace ON documents(workspace_id, added_at)"
         )
         await db.execute(
-            "CREATE INDEX IF NOT EXISTS idx_chat_messages_chat ON chat_messages(chat_id, created_at)"
-        )
-        await db.execute(
             "CREATE INDEX IF NOT EXISTS idx_documents_name ON documents(name)"
         )
         await _ensure_chat_schema(db)
@@ -179,7 +177,6 @@ async def init_db():
             await db.commit()
 
 
-# Workspace Operations
 async def get_workspace(ws_id: str) -> Optional[Dict[str, Any]]:
     async with get_db() as db:
         cursor = await db.execute("SELECT * FROM workspaces WHERE id = ?", (ws_id,))
@@ -266,14 +263,23 @@ async def delete_workspace(ws_id: str) -> bool:
             if r["file_path"] and os.path.exists(r["file_path"]):
                 try:
                     os.remove(r["file_path"])
-                except Exception:
+                except OSError:
                     pass
         cursor = await db.execute("DELETE FROM workspaces WHERE id = ?", (ws_id,))
         await db.commit()
         return (cursor.rowcount or 0) > 0
 
 
-# Document Operations
+def _starter_note(title: str, doc_type: str = "pdf") -> str:
+    if doc_type == "latex":
+        return (
+            "\\documentclass{article}\n\\begin{document}\n\n"
+            f"\\title{{{title}}}\n\\maketitle\n\n"
+            "Welcome to your new LaTeX document!\n\n\\end{document}"
+        )
+    return STARTER_NOTE_TEMPLATE.replace("this document", title)
+
+
 async def create_document(
     doc_id: str,
     workspace_id: str,
@@ -287,11 +293,7 @@ async def create_document(
 ) -> Dict[str, Any]:
     now = time.time()
     title = note_title or os.path.splitext(name)[0]
-    
-    if doc_type == "latex":
-        starter_note = "\\documentclass{article}\n\\begin{document}\n\n\\title{" + title + "}\n\\maketitle\n\nWelcome to your new LaTeX document!\n\n\\end{document}"
-    else:
-        starter_note = STARTER_NOTE_TEMPLATE.replace("this document", title)
+    starter_note = _starter_note(title, doc_type)
 
     async with get_db() as db:
         await db.execute(
@@ -380,14 +382,13 @@ async def delete_document(doc_id: str) -> bool:
         if row and row["file_path"] and os.path.exists(row["file_path"]):
             try:
                 os.remove(row["file_path"])
-            except Exception:
+            except OSError:
                 pass
         cursor = await db.execute("DELETE FROM documents WHERE id = ?", (doc_id,))
         await db.commit()
         return (cursor.rowcount or 0) > 0
 
 
-# Note Operations
 async def get_note(doc_id: str) -> Dict[str, Any]:
     async with get_db() as db:
         cursor = await db.execute("SELECT * FROM notes WHERE document_id = ?", (doc_id,))
@@ -397,11 +398,12 @@ async def get_note(doc_id: str) -> Dict[str, Any]:
         # Same connection for the title lookup (was: get_document() opened
         # a nested second connection to the same SQLite file).
         doc_cursor = await db.execute(
-            "SELECT note_title FROM documents WHERE id = ?", (doc_id,)
+            "SELECT note_title, doc_type FROM documents WHERE id = ?", (doc_id,)
         )
         doc_row = await doc_cursor.fetchone()
         title = doc_row["note_title"] if doc_row and doc_row["note_title"] else "document"
-        content = STARTER_NOTE_TEMPLATE.replace("this document", title)
+        doc_type = doc_row["doc_type"] if doc_row and doc_row["doc_type"] else "pdf"
+        content = _starter_note(title, doc_type)
         now = time.time()
         await db.execute(
             "INSERT OR REPLACE INTO notes (document_id, content, updated_at) VALUES (?, ?, ?)",
@@ -422,7 +424,6 @@ async def save_note(doc_id: str, content: str) -> Dict[str, Any]:
     return {"document_id": doc_id, "content": content, "updated_at": now}
 
 
-# Search Operations
 async def search_all(query: str) -> List[Dict[str, Any]]:
     q = f"%{query.strip().lower()}%"
     results = []
@@ -498,15 +499,6 @@ async def _ensure_chat_schema(db) -> None:
         await db.execute("DROP TABLE chat_messages")
         await db.execute("ALTER TABLE chat_messages_new RENAME TO chat_messages")
 
-    await db.execute("""
-        CREATE TABLE IF NOT EXISTS chats (
-            id TEXT PRIMARY KEY,
-            title TEXT NOT NULL DEFAULT 'New chat',
-            document_id TEXT,
-            created_at REAL NOT NULL,
-            updated_at REAL NOT NULL
-        );
-    """)
     await db.execute(
         "CREATE INDEX IF NOT EXISTS idx_chat_messages_chat ON chat_messages(chat_id, created_at)"
     )
@@ -630,13 +622,7 @@ def _decode_cited_pages(raw: Any) -> List[int]:
         return []
     if not isinstance(parsed, list):
         return []
-    out = set()
-    for p in parsed:
-        try:
-            out.add(int(p))
-        except (TypeError, ValueError):
-            continue
-    return sorted(out)
+    return dedupe_pages(parsed)
 
 
 def _chat_msg_row_to_msg(row) -> Dict[str, Any]:
@@ -663,7 +649,7 @@ async def add_chat_message(
                 role,
                 content,
                 now,
-                json.dumps(_dedupe_pages(cited_pages)),
+                json.dumps(dedupe_pages(cited_pages)),
             ),
         )
         row = await cursor.fetchone()
@@ -683,13 +669,6 @@ async def get_all_settings() -> Dict[str, str]:
         return {r["key"]: r["value"] for r in rows}
 
 
-async def get_setting(key: str, default: Optional[str] = None) -> Optional[str]:
-    async with get_db() as db:
-        cursor = await db.execute("SELECT value FROM app_settings WHERE key = ?", (key,))
-        row = await cursor.fetchone()
-        return row["value"] if row else default
-
-
 async def set_settings(entries: Dict[str, Any]) -> None:
     now = time.time()
     async with get_db() as db:
@@ -705,8 +684,7 @@ async def set_settings(entries: Dict[str, Any]) -> None:
                 )
         await db.commit()
 
-# Chunking Operations
-def _dedupe_pages(pages: Optional[Iterable[Any]]) -> List[int]:
+def dedupe_pages(pages: Optional[Iterable[Any]]) -> List[int]:
     """Coerce an iterable of page numbers to a sorted unique int list."""
     out = set()
     for p in pages or ():
@@ -727,10 +705,6 @@ async def store_chunks(document_id: str, chunks: List[Dict[str, Any]]) -> None:
             )
         await db.commit()
 
-async def delete_document_chunks(document_id: str) -> None:
-    async with get_db() as db:
-        await db.execute("DELETE FROM document_chunks WHERE document_id = ?", (document_id,))
-        await db.commit()
 
 _CHAT_STOPWORDS = frozenset(
     "a an the and or but if then else when what which who how why "
@@ -761,7 +735,6 @@ async def search_chunks(document_ids: List[str], query: str, limit: int = 10) ->
     if not document_ids:
         return []
 
-    import re
     # Strip everything except alphanumeric (incl. unicode letters/digits), keep
     # spaces. The previous `[^a-zA-Z0-9\s]` class silently deleted accented and
     # non-Latin characters, degrading queries in other languages to nothing.
@@ -799,7 +772,6 @@ async def search_chunks(document_ids: List[str], query: str, limit: int = 10) ->
         return await _run(" OR ".join(quoted))
     except aiosqlite.OperationalError:
         # Malformed MATCH (e.g. a query FTS5 cannot parse) must not 500 chat.
-        logger = __import__("logging").getLogger("rsrch.db")
         logger.warning("Chunk search failed for %d terms; dropping to empty", len(terms))
         return []
 

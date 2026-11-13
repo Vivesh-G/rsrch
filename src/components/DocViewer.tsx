@@ -14,6 +14,12 @@ import { HistoryPluginPackage } from '@embedpdf/plugin-history/react';
 import { PdfAnnotationSubtype } from '@embedpdf/models';
 import type { DocumentItem } from '../types';
 import { api } from '../services/api';
+import { getDocDisplayName, hasPdfOutput, isLatexDoc, normalizeQuoteText } from '../utils/document';
+import { readRawStored, removeStored, writeRawStored, STORAGE_KEYS } from '../utils/storage';
+import { emitEvent, onEvent } from '../utils/events';
+import { triggerDownloadBlob, triggerDownloadUrl } from '../utils/dom';
+import { awaitTask, emitInverseSyncFromPoint, pulseSyncTexRect, scrollWhenLayoutReady } from '../utils/embedpdf';
+import { InlineRenameInput } from './InlineRenameInput';
 import {
   IconBookmark,
   IconBookmarkFilled,
@@ -32,20 +38,9 @@ import {
   IconExternalLink,
 } from './Icons';
 
-// Legacy types kept for export compatibility (pre-EmbedPDF % rects are no
-// longer produced; persistent highlights are stored as annotation transfers).
-export interface HighlightRect {
-  top: number;
-  left: number;
-  width: number;
-  height: number;
-}
-
-
 interface DocViewerProps {
   doc: DocumentItem | null;
   onToggleBookmark: (docId: string) => void;
-  onDownloadNotes?: () => void;
   onDeleteDoc?: (docId: string) => void;
   onDropFiles: (files: FileList) => void;
   onAddToNote?: (quoteText: string, pageNumber: number) => void;
@@ -53,20 +48,6 @@ interface DocViewerProps {
   onClose?: () => void;
   dragHandle?: React.ReactNode;
 }
-
-const baseName = (n?: string) => (n || '').replace(/\.pdf$/i, '');
-const HL_KEY = (docId: string) => `rsrch-pdf-highlights-${docId}`;
-const PAGE_KEY = (docId: string) => `rshr-page-${docId}`;
-
-// Cross-remount handoff for LaTeX auto-renders. Closing + reopening the
-// document resets scroll state to page 1, and the page-save effect would
-// persist that transient "1" over the user's real position before the
-// restore pass runs — every render lands back on page 1. So the compile
-// handler captures the true page BEFORE close (map survives the
-// LoadedViewer unmount/remount), the save effect pauses while a reload is
-// in flight, and the restore pass prefers the captured value.
-const latexPageRestore = new Map<string, number>();
-const latexReloading = new Set<string>();
 
 const plugins = [
   createPluginRegistration(DocumentManagerPluginPackage),
@@ -92,7 +73,16 @@ const plugins = [
 // only on full viewer unmount (e.g. back to overview). Tradeoff: memory
 // grows with open docs instead of re-parse cost — right call for a
 // research library of a handful of PDFs.
-const DocumentKeeper: React.FC<{ doc: DocumentItem }> = ({ doc }) => {
+interface ViewerReloadRefs {
+  latexPageRestoreRef: React.MutableRefObject<Map<string, number>>;
+  latexReloadingRef: React.MutableRefObject<Set<string>>;
+}
+
+const DocumentKeeper: React.FC<{ doc: DocumentItem } & ViewerReloadRefs> = ({
+  doc,
+  latexPageRestoreRef,
+  latexReloadingRef,
+}) => {
   const { provides: docManager } = useDocumentManagerCapability();
   const ready = !!docManager;
   const mgrRef = useRef(docManager);
@@ -124,33 +114,41 @@ const DocumentKeeper: React.FC<{ doc: DocumentItem }> = ({ doc }) => {
             done(false);
             return;
           }
-          mgr
-            .openDocumentBuffer({ buffer, name: doc.name, documentId: doc.id })
-            .wait(
-              () => done(true),
+          let succeeded = true;
+          await new Promise<void>((resolve) => {
+            mgr.openDocumentBuffer({ buffer, name: doc.name, documentId: doc.id }).wait(
+              () => resolve(),
               (reason) => {
                 console.error('Failed to open PDF buffer:', reason);
-                done(false);
+                succeeded = false;
+                resolve();
               },
             );
-        } else if (doc.has_file || doc.doc_type === 'latex') {
+          });
+          done(succeeded);
+        } else if (hasPdfOutput(doc)) {
           if (cancelled) {
             done(false);
             return;
           }
-          mgr
-            .openDocumentUrl({
-              url: api.getDocumentFileUrl(doc.id),
-              name: doc.name,
-              documentId: doc.id,
-            })
-            .wait(
-              () => done(true),
-              (reason) => {
-                console.error('Failed to open PDF url:', reason);
-                done(false);
-              },
-            );
+          let succeeded = true;
+          await new Promise<void>((resolve) => {
+            mgr
+              .openDocumentUrl({
+                url: api.getDocumentFileUrl(doc.id),
+                name: doc.name,
+                documentId: doc.id,
+              })
+              .wait(
+                () => resolve(),
+                (reason) => {
+                  console.error('Failed to open PDF url:', reason);
+                  succeeded = false;
+                  resolve();
+                },
+              );
+          });
+          done(succeeded);
         } else {
           done(false);
         }
@@ -169,108 +167,87 @@ const DocumentKeeper: React.FC<{ doc: DocumentItem }> = ({ doc }) => {
     // NOTE: docManager intentionally excluded — its identity changes on
     // registry updates and would re-trigger open in a loop.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [ready, doc.id, doc.file, doc.has_file, doc.name]);
+  }, [ready, doc.id, doc.file, doc.has_file, doc.doc_type, doc.name]);
 
   useEffect(() => {
     let reloadSeq = 0;
-    const handleCompile = (e: Event) => {
-      const detail = (e as CustomEvent).detail;
-      if (detail?.docId === doc.id && (doc.has_file || doc.doc_type === 'latex') && mgrRef.current) {
-         try {
-            const mgr: any = mgrRef.current;
-            const timestamp = Date.now();
-            const mySeq = ++reloadSeq;
-            // Capture the open page BEFORE close: after close the scroll
-            // state resets to 1 and would clobber the saved position.
-            let wantPage: number | null = null;
-            try {
-              const raw = localStorage.getItem(PAGE_KEY(doc.id));
-              const n = raw ? parseInt(raw, 10) : NaN;
-              if (Number.isFinite(n) && (n as number) >= 1) wantPage = n as number;
-            } catch {}
-            if (wantPage == null) {
-              const fallback = latexPageRestore.get(doc.id);
-              if (fallback != null && fallback >= 1) wantPage = fallback;
-            }
-            if (wantPage != null) latexPageRestore.set(doc.id, wantPage);
-            latexReloading.add(doc.id);
-            // closeDocument is ASYNC (returns a Task). The previous code
-            // fired open immediately after close, so open raced close on
-            // the same documentId: the engine could reject with duplicate
-            // id or leave the store closed. Network headers still resolve
-            // (HTTP 200) while the viewer stays blank — exactly the
-            // reported symptom. Chain open after close settles, and drop
-            // stale reloads from rapid successive compiles.
-            const doOpen = () => {
-              if (mySeq !== reloadSeq) return; // superseded by newer compile
-              openedRef.current.delete(doc.id);
-              openingRef.current.add(doc.id);
-              try {
-                mgr
-                  .openDocumentUrl({
-                    url: api.getDocumentFileUrl(doc.id) + "?t=" + timestamp,
-                    name: doc.name,
-                    documentId: doc.id,
-                  })
-                  .wait(
-                    () => {
-                      if (mySeq !== reloadSeq) return;
-                      openingRef.current.delete(doc.id);
-                      openedRef.current.add(doc.id);
-                      // Notify the viewer (covers the path where LoadedViewer
-                      // never unmounted so its mount-restore doesn't rerun).
-                      // The remount path consumes latexPageRestore instead;
-                      // both target the same page so a double-fire is harmless.
-                      const target = latexPageRestore.get(doc.id);
-                      if (target != null) {
-                        window.dispatchEvent(
-                          new CustomEvent('rsrch:latex-restored', {
-                            detail: { docId: doc.id, page: target },
-                          })
-                        );
-                      }
-                      // Grace period: post-open scroll state briefly reports
-                      // page 1 before the restore lands — keep the save
-                      // effect paused until then so "1" isn't persisted.
-                      setTimeout(() => latexReloading.delete(doc.id), 3000);
-                    },
-                    (reason: unknown) => {
-                      console.error('Failed to reload PDF after compile:', reason);
-                      openingRef.current.delete(doc.id);
-                      latexReloading.delete(doc.id);
-                    },
-                  );
-              } catch (err) {
-                console.error('Failed to reload PDF after compile:', err);
-                openingRef.current.delete(doc.id);
-                latexReloading.delete(doc.id);
-              }
-            };
-            // Reload under the SAME documentId: Viewport/Scroller/RenderLayer
-            // and DocumentContent are all bound to doc.id. Opening a new
-            // "_latex_<ts>" id orphans the UI (it keeps watching the closed
-            // id → blank viewer). Cache-bust via URL query instead.
-            try {
-              const closeTask = mgr.closeDocument(doc.id);
-              if (closeTask && typeof closeTask.wait === 'function') {
-                closeTask.wait(() => doOpen(), () => doOpen());
-              } else if (closeTask && typeof closeTask.toPromise === 'function') {
-                closeTask.toPromise().then(() => doOpen(), () => doOpen());
-              } else {
-                doOpen();
-              }
-            } catch {
-              doOpen();
-            }
-         } catch (err) { console.error(err); }
+    let graceTimer: ReturnType<typeof setTimeout> | null = null;
+
+    const unsubCompile = onEvent('latex-compiled', async (detail) => {
+      if (detail?.docId !== doc.id || !hasPdfOutput(doc) || !mgrRef.current) return;
+      try {
+        const mgr: any = mgrRef.current;
+        const timestamp = Date.now();
+        const mySeq = ++reloadSeq;
+        // Capture the open page BEFORE close: after close the scroll
+        // state resets to 1 and would clobber the saved position.
+        let wantPage: number | null = null;
+        const raw = readRawStored(STORAGE_KEYS.pageForDoc(doc.id));
+        const n = raw ? parseInt(raw, 10) : NaN;
+        if (Number.isFinite(n) && n >= 1) wantPage = n;
+        if (wantPage == null) {
+          const fallback = latexPageRestoreRef.current.get(doc.id);
+          if (fallback != null && fallback >= 1) wantPage = fallback;
+        }
+        if (wantPage != null) latexPageRestoreRef.current.set(doc.id, wantPage);
+        latexReloadingRef.current.add(doc.id);
+
+        try {
+          await awaitTask(mgr.closeDocument(doc.id));
+        } catch {
+          // ignore close errors
+        }
+
+        if (mySeq !== reloadSeq) return; // superseded by newer compile
+        openedRef.current.delete(doc.id);
+        openingRef.current.add(doc.id);
+
+        try {
+          let reloaded = true;
+          const openTask = mgr.openDocumentUrl({
+            url: `${api.getDocumentFileUrl(doc.id)}?t=${timestamp}`,
+            name: doc.name,
+            documentId: doc.id,
+          });
+          await new Promise<void>((resolve) => {
+            openTask.wait(
+              () => resolve(),
+              (reason: unknown) => {
+                console.error('Failed to reload PDF after compile:', reason);
+                reloaded = false;
+                resolve();
+              },
+            );
+          });
+          if (mySeq !== reloadSeq) return;
+          openingRef.current.delete(doc.id);
+          if (!reloaded) {
+            latexReloadingRef.current.delete(doc.id);
+            return;
+          }
+          openedRef.current.add(doc.id);
+          const target = latexPageRestoreRef.current.get(doc.id);
+          if (target != null) {
+            emitEvent('latex-restored', { docId: doc.id, page: target });
+          }
+          if (graceTimer) clearTimeout(graceTimer);
+          graceTimer = setTimeout(() => latexReloadingRef.current.delete(doc.id), 3000);
+        } catch (err) {
+          console.error('Failed to reload PDF after compile:', err);
+          openingRef.current.delete(doc.id);
+          latexReloadingRef.current.delete(doc.id);
+        }
+      } catch (err) {
+        console.error(err);
       }
-    };
-    window.addEventListener('rsrch:latex-compiled', handleCompile);
+    });
+
     return () => {
       reloadSeq++;
-      window.removeEventListener('rsrch:latex-compiled', handleCompile);
+      if (graceTimer) clearTimeout(graceTimer);
+      unsubCompile();
     };
-  }, [doc.id, doc.has_file, doc.doc_type, doc.name]);
+  }, [doc, latexPageRestoreRef, latexReloadingRef]);
 
   // Full unmount only (leaving the viewer): release all engine documents.
   useEffect(() => {
@@ -337,26 +314,6 @@ const dedupeTransfers = (items: unknown[]): unknown[] => {
   });
 };
 
-// exportAnnotations() returns a Task shaped either { wait } or { toPromise }
-// depending on build — normalize to a promise that never rejects.
-const exportCurrent = (scope: any): Promise<unknown[]> =>
-  new Promise((resolve) => {
-    try {
-      const task = scope?.exportAnnotations();
-      if (!task) return resolve([]);
-      const done = (list: unknown) => resolve(Array.isArray(list) ? list : []);
-      if (typeof task.wait === 'function') {
-        task.wait(done, () => resolve([]));
-      } else if (typeof task.toPromise === 'function') {
-        task.toPromise().then(done, () => resolve([]));
-      } else {
-        resolve([]);
-      }
-    } catch {
-      resolve([]);
-    }
-  });
-
 const HighlightRestorer: React.FC<{ docId: string }> = ({ docId }) => {
   const { provides: annotationCapability } = useAnnotationCapability();
 
@@ -378,12 +335,10 @@ const HighlightRestorer: React.FC<{ docId: string }> = ({ docId }) => {
     let cancelled = false;
     let saved: unknown[] | null = null;
     try {
-      const raw = localStorage.getItem(HL_KEY(docId));
+      const raw = readRawStored(STORAGE_KEYS.pdfHighlights(docId));
       if (raw) {
         if (raw.length > MAX_SAVED_ANNOTATIONS_BYTES) {
-          try {
-            localStorage.removeItem(HL_KEY(docId));
-          } catch {}
+          removeStored(STORAGE_KEYS.pdfHighlights(docId));
         } else {
           const parsed = JSON.parse(raw);
           if (Array.isArray(parsed) && parsed.length > 0) {
@@ -404,7 +359,8 @@ const HighlightRestorer: React.FC<{ docId: string }> = ({ docId }) => {
           importedRef.current = docId;
           return;
         }
-        const current = await exportCurrent(scope);
+        const exported = await awaitTask<unknown[]>(scope.exportAnnotations(), []);
+        const current = Array.isArray(exported) ? exported : [];
         if (cancelled) return;
         const existing = new Set<string>();
         const counts = new Map<string, number>();
@@ -470,33 +426,20 @@ const HighlightRestorer: React.FC<{ docId: string }> = ({ docId }) => {
   // and doesn't churn on capability identity changes.
   useEffect(() => {
     if (!annotationCapability) return;
-    const unsub = annotationCapability.onAnnotationEvent((ev: any) => {
+    const unsub = annotationCapability.onAnnotationEvent(async (ev: any) => {
       // Only persist events for our document.
       if (ev.documentId !== docId) return;
       try {
         const scope = capRef.current?.forDocument(docId);
         if (!scope) return;
-        const task = scope.exportAnnotations();
+        const exported = await awaitTask<unknown[]>(scope.exportAnnotations(), []);
         // Dedupe before saving so a duplicated store can't poison the cache
         // and multiply further on the next import; quota failure must not
         // throw out of these async callbacks.
-        const save = (exported: unknown) => {
-          try {
-            const clean = dedupeTransfers(sanitizeTransfers(Array.isArray(exported) ? exported : []));
-            const json = JSON.stringify(clean);
-            if (json.length > MAX_SAVED_ANNOTATIONS_BYTES) return;
-            localStorage.setItem(HL_KEY(docId), json);
-          } catch (err) {
-            console.warn('Failed to persist annotations:', err);
-          }
-        };
-        if (task) {
-          if (typeof task.wait === 'function') {
-            task.wait(save, (err: any) => console.error('Export failed:', err));
-          } else if (typeof (task as any).toPromise === 'function') {
-            (task as any).toPromise().then(save).catch((err: any) => console.error('Export failed:', err));
-          }
-        }
+        const clean = dedupeTransfers(sanitizeTransfers(Array.isArray(exported) ? exported : []));
+        const json = JSON.stringify(clean);
+        if (json.length > MAX_SAVED_ANNOTATIONS_BYTES) return;
+        writeRawStored(STORAGE_KEYS.pdfHighlights(docId), json);
       } catch (err) {
         console.error('onAnnotationEvent error:', err);
       }
@@ -553,7 +496,7 @@ const SelectionMenu: React.FC<{
   });
 
   const handleCopy = withText((text, pageNumber) => {
-    const clean = text.split(/\r?\n/).map((l) => l.trim()).filter(Boolean).join(' ');
+    const clean = normalizeQuoteText(text);
     navigator.clipboard?.writeText(`> "${clean}" [p. ${pageNumber}]`).then(() => {
       onToast('Copied citation to clipboard');
     }).catch(() => {
@@ -568,40 +511,8 @@ const SelectionMenu: React.FC<{
       if (domSelection && domSelection.rangeCount > 0) {
         const range = domSelection.getRangeAt(0);
         const rect = range.getBoundingClientRect();
-        
-        let container: Node | null = range.startContainer;
-        if (container.nodeType === Node.TEXT_NODE) {
-          container = container.parentElement;
-        }
-        const pageEl = (container as Element)?.closest('[data-testid^="core__page-layer-"]') as HTMLElement;
-        
-        if (pageEl) {
-          const match = pageEl.getAttribute('data-testid')?.match(/core__page-layer-(\d+)/);
-          if (match) {
-            const pageIndex = parseInt(match[1], 10);
-            const pageRect = pageEl.getBoundingClientRect();
-            if (pageRect.width <= 0 || pageRect.height <= 0) return;
-            const x = rect.left - pageRect.left;
-            const y = rect.top - pageRect.top;
-            // Send DOM fractions (size-independent) + legacy pt estimate.
-            // The matcher prefers fx/fy mapped through the page's own
-            // SyncTeX extents, so A4/letter/custom sizes all work.
-            const fx = Math.min(1, Math.max(0, x / pageRect.width));
-            const fy = Math.min(1, Math.max(0, y / pageRect.height));
-            const pdfWidth = 595.28;
-            const pdfHeight = 841.89;
-            const pdfX = fx * pdfWidth;
-            const pdfY = fy * pdfHeight;
-
-            window.dispatchEvent(
-              new CustomEvent('rsrch:inverse-sync', {
-                detail: { docId: documentId, page: pageIndex + 1, x: pdfX, y: pdfY, fx, fy }
-              })
-            );
-            selection?.forDocument(documentId)?.clear();
-          } else {
-            console.warn('Go to Block: page index not found');
-          }
+        if (emitInverseSyncFromPoint(documentId, range.startContainer, rect.left, rect.top)) {
+          selection?.forDocument(documentId)?.clear();
         } else {
           console.warn('Go to Block: selection is outside a PDF page layer');
         }
@@ -640,16 +551,7 @@ const SelectionMenu: React.FC<{
             }
           }
           
-          try {
-             const commitTask = (annotationApi as any)?.commit?.();
-             if (commitTask && typeof commitTask.toPromise === 'function') {
-                 commitTask.toPromise().catch(console.error);
-             } else if (commitTask && typeof commitTask.wait === 'function') {
-                 commitTask.wait(() => {}, console.error);
-             }
-          } catch (err) {
-             console.error('commit failed', err);
-          }
+          awaitTask((annotationApi as any)?.commit?.()).catch(console.error);
 
           onToast(
             formatted.length === 1
@@ -705,20 +607,20 @@ const SelectionMenu: React.FC<{
 // Mounted only once DocumentContent reports isLoaded — useScroll/useZoom
 // throw when the document state isn't registered yet, so they must not mount
 // before the open completes (or after close on doc switch).
-const LoadedViewer: React.FC<DocViewerProps> = ({
+const LoadedViewer: React.FC<DocViewerProps & ViewerReloadRefs> = ({
   doc,
   onToggleBookmark,
-  onDownloadNotes,
   onDeleteDoc,
   onDropFiles,
   onAddToNote,
   onRenameDoc,
   onClose,
   dragHandle,
+  latexPageRestoreRef,
+  latexReloadingRef,
 }) => {
   const docViewRef = useRef<HTMLDivElement>(null);
   const [renaming, setRenaming] = useState(false);
-  const [renameValue, setRenameValue] = useState('');
   const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
   // No key={doc.id} remount here on purpose: remounting the whole
@@ -742,7 +644,6 @@ const LoadedViewer: React.FC<DocViewerProps> = ({
   // Transient UI resets on doc switch (previously handled by remount).
   useEffect(() => {
     setRenaming(false);
-    setRenameValue('');
     setToastMessage(null);
     if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
   }, [docId]);
@@ -766,106 +667,50 @@ const LoadedViewer: React.FC<DocViewerProps> = ({
     if (!scrollApi || !docId || scrollRestoredRef.current.has(docId)) return;
     // Prefer the pre-reload capture (immune to the page-1 clobber); consume
     // it so a later remount falls back to the persisted value.
-    const pending = latexPageRestore.get(docId);
-    if (pending != null) latexPageRestore.delete(docId);
-    const saved = pending != null ? String(pending) : localStorage.getItem(PAGE_KEY(docId));
-    if (!saved) { scrollRestoredRef.current.add(docId); return; }
+    const pending = latexPageRestoreRef.current.get(docId);
+    if (pending != null) latexPageRestoreRef.current.delete(docId);
+    const saved = pending != null ? String(pending) : readRawStored(STORAGE_KEYS.pageForDoc(docId));
+    if (!saved) {
+      scrollRestoredRef.current.add(docId);
+      return;
+    }
     const pageNum = parseInt(saved, 10);
-    if (isNaN(pageNum) || pageNum < 1) { scrollRestoredRef.current.add(docId); return; }
+    if (isNaN(pageNum) || pageNum < 1) {
+      scrollRestoredRef.current.add(docId);
+      return;
+    }
     // Mark immediately to prevent duplicate attempts from re-renders.
     scrollRestoredRef.current.add(docId);
-    let stopped = false;
-    let attempts = 0;
-    const MAX_ATTEMPTS = 16; // ~4s
-    const unsubs: Array<() => void> = [];
-    const finish = () => {
-      stopped = true;
-      clearInterval(timer);
-      for (const u of unsubs) {
-        try { u(); } catch {}
-      }
-      unsubs.length = 0;
-    };
-    const layoutReady = (): boolean => {
-      try {
-        const layout = scrollApi.getLayout();
-        return Array.isArray(layout?.virtualItems) && layout.virtualItems.length > 0;
-      } catch {
-        return false; // no doc state yet
-      }
-    };
-    const attempt = () => {
-      if (stopped || !layoutReady()) return;
-      try {
-        scrollApi.scrollToPage({ pageNumber: pageNum, behavior: 'instant' });
-        finish();
-      } catch {
-        // Transient (state torn down mid-switch) — keep retrying.
-      }
-    };
-    const timer = setInterval(() => {
-      attempts += 1;
-      if (attempts > MAX_ATTEMPTS) finish();
-      else attempt();
-    }, 250);
-    attempt();
-    try {
-      unsubs.push(scrollApi.onLayoutChange(() => attempt()));
-    } catch {}
-    try {
-      const u = scrollCapability?.onLayoutReady((ev: any) => {
-        if (ev.documentId === docId) attempt();
-      });
-      if (u) unsubs.push(u);
-    } catch {}
-    return () => {
-      finish();
-    };
-  }, [scrollApi, scrollCapability, docId]);
+    return scrollWhenLayoutReady(scrollApi, scrollCapability, docId, pageNum);
+  }, [scrollApi, scrollCapability, docId, latexPageRestoreRef]);
 
   // Save scroll (paused while a LaTeX reload is in flight — the torn-down
   // document briefly reports page 1, which must not overwrite the real
   // position being restored).
   useEffect(() => {
-    if (scrollState?.currentPage && docId && !latexReloading.has(docId)) {
-      try {
-        localStorage.setItem(PAGE_KEY(docId), String(scrollState.currentPage));
-      } catch {}
+    if (scrollState?.currentPage && docId && !latexReloadingRef.current.has(docId)) {
+      writeRawStored(STORAGE_KEYS.pageForDoc(docId), String(scrollState.currentPage));
     }
-  }, [scrollState?.currentPage, docId]);
+  }, [scrollState?.currentPage, docId, latexReloadingRef]);
 
   // Latex-reload restore for the no-unmount path: if LoadedViewer survived
   // the close/open (mount-restore didn't rerun), scroll once layout is
   // measurable. Retries mirror the mount-restore polling.
   useEffect(() => {
     if (!scrollApi || !docId) return;
-    const handler = (e: Event) => {
-      const d = (e as CustomEvent<{ docId: string; page: number }>).detail;
+    let cancelWait: (() => void) | null = null;
+    const unsub = onEvent('latex-restored', (d) => {
       if (!d || d.docId !== docId || !d.page || d.page < 1) return;
-      let attempts = 0;
-      const t = setInterval(() => {
-        attempts += 1;
-        let ready = false;
-        try {
-          const layout = (scrollApi as any).getLayout?.();
-          ready = Array.isArray(layout?.virtualItems) && layout.virtualItems.length > 0;
-        } catch {
-          ready = false;
-        }
-        if (ready) {
-          try {
-            scrollApi.scrollToPage({ pageNumber: d.page, behavior: 'instant' });
-          } catch {}
-          latexPageRestore.delete(docId);
-          clearInterval(t);
-        } else if (attempts >= 16) {
-          clearInterval(t);
-        }
-      }, 250);
+      cancelWait?.();
+      cancelWait = scrollWhenLayoutReady(scrollApi, scrollCapability, docId, d.page, () => {
+        latexPageRestoreRef.current.delete(docId);
+      });
+    });
+    return () => {
+      cancelWait?.();
+      unsub();
     };
-    window.addEventListener('rsrch:latex-restored', handler);
-    return () => window.removeEventListener('rsrch:latex-restored', handler);
-  }, [scrollApi, docId]);
+  }, [scrollApi, scrollCapability, docId, latexPageRestoreRef]);
 
   const showToast = useCallback((msg: string) => {
     if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
@@ -910,8 +755,7 @@ const LoadedViewer: React.FC<DocViewerProps> = ({
 
   // Preserve the rsrch:scroll-to-page contract from the notes panel.
   useEffect(() => {
-    const handler = (e: Event) => {
-      const page = (e as CustomEvent<{ page: number }>).detail?.page;
+    const unsubPage = onEvent('scroll-to-page', ({ page }) => {
       if (!page || page < 1) return;
       try {
         scrollApi?.scrollToPage({ pageNumber: page, behavior: 'smooth' });
@@ -925,56 +769,26 @@ const LoadedViewer: React.FC<DocViewerProps> = ({
         el.classList.add('pdf-page-focus-pulse');
         setTimeout(() => el.classList.remove('pdf-page-focus-pulse'), 1800);
       }
-    };
-    
-    const rectHandler = (e: Event) => {
-      const detail = (e as CustomEvent).detail;
+    });
+
+    const unsubRect = onEvent('scroll-to-rect', (detail) => {
       if (!detail || !detail.page || detail.page < 1) return;
       try {
         scrollApi?.scrollToPage({ pageNumber: detail.page, behavior: 'smooth' });
-      } catch {}
-      
-      setTimeout(() => {
-        // EmbedPDF pages are usually available by index.
-        const pageEl = document.querySelector(`[data-testid="core__page-layer-${detail.page - 1}"]`) as HTMLElement;
-        if (pageEl) {
-          const hl = document.createElement('div');
-          hl.className = 'synctex-highlight-pulse';
-          hl.style.position = 'absolute';
-          // SyncTeX coordinates are in TeX points (1/72.27 inch). 
-          // We can approximate by converting to percentages based on A4 size, 
-          // but if we use the unscaled PDF points, EmbedPDF applies a scale transform!
-          // We'll use percentages assuming ~595x842 as fallback, but use the pageEl's dimensions to scale if it's already scaled.
-          // Since it's a quick pulse, a CSS animation on the Y offset will do.
-          const pdfWidth = 595.28;
-          const pdfHeight = 841.89;
-          
-          hl.style.left = `${(detail.x / pdfWidth) * 100}%`;
-          hl.style.bottom = `${(1 - (detail.y / pdfHeight)) * 100}%`;
-          hl.style.width = `${(detail.width / pdfWidth) * 100}%`;
-          hl.style.height = `${(detail.height / pdfHeight) * 100}%`;
-          hl.style.backgroundColor = 'rgba(255, 200, 0, 0.4)';
-          hl.style.zIndex = '999';
-          hl.style.pointerEvents = 'none';
-          hl.style.borderRadius = '4px';
-          hl.style.animation = 'pulse-fade 1.5s ease-out forwards';
-          
-          pageEl.appendChild(hl);
-          setTimeout(() => hl.remove(), 1600);
-        }
-      }, 100);
-    };
+      } catch {
+        // ignore transient scroll error
+      }
+      pulseSyncTexRect(detail.page, detail.x, detail.y, detail.width, detail.height);
+    });
 
-    window.addEventListener('rsrch:scroll-to-page', handler);
-    window.addEventListener('rsrch:scroll-to-rect', rectHandler);
     return () => {
-      window.removeEventListener('rsrch:scroll-to-page', handler);
-      window.removeEventListener('rsrch:scroll-to-rect', rectHandler);
+      unsubPage();
+      unsubRect();
     };
   }, [scrollApi]);
 
   if (!doc) return null;
-  const displayTitle = doc.note_title || baseName(doc.name);
+  const displayTitle = getDocDisplayName(doc);
 
   const prevPage = () => scrollApi?.scrollToPreviousPage('smooth');
   const nextPage = () => scrollApi?.scrollToNextPage('smooth');
@@ -983,19 +797,11 @@ const LoadedViewer: React.FC<DocViewerProps> = ({
     if (!doc) return;
     const downloadName = doc.name.replace(/\.tex$/i, '.pdf');
     if (doc.file) {
-      const a = document.createElement('a');
-      document.body.appendChild(a);
-      const url = URL.createObjectURL(doc.file);
-      a.href = url;
-      a.download = downloadName;
-      a.click();
-      setTimeout(() => URL.revokeObjectURL(url), 10_000);
-      a.remove();
+      triggerDownloadBlob(doc.file, downloadName);
       showToast('Downloaded PDF');
-    } else if (doc.has_file || doc.doc_type === 'latex') {
+    } else if (hasPdfOutput(doc)) {
       try {
-        const fileUrl = api.getDocumentFileUrl(doc.id);
-        const res = await fetch(fileUrl);
+        const res = await fetch(api.getDocumentFileUrl(doc.id));
         if (!res.ok) {
           if (res.status === 404) {
             showToast('PDF not ready — please check compile errors first');
@@ -1004,26 +810,12 @@ const LoadedViewer: React.FC<DocViewerProps> = ({
           throw new Error(`Download failed with status ${res.status}`);
         }
         const blob = await res.blob();
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        document.body.appendChild(a);
-        a.href = url;
-        a.download = downloadName;
-        a.click();
-        setTimeout(() => URL.revokeObjectURL(url), 10_000);
-        a.remove();
+        triggerDownloadBlob(blob, downloadName);
         showToast('Downloaded PDF');
       } catch (err) {
         console.warn('Blob download failed, falling back to direct anchor:', err);
-        const a = document.createElement('a');
-        document.body.appendChild(a);
-        a.href = api.getDocumentFileUrl(doc.id);
-        a.download = downloadName;
-        a.click();
-        a.remove();
+        triggerDownloadUrl(api.getDocumentFileUrl(doc.id), downloadName);
       }
-    } else if (onDownloadNotes) {
-      onDownloadNotes();
     }
   };
 
@@ -1059,7 +851,7 @@ const LoadedViewer: React.FC<DocViewerProps> = ({
               documentId={doc.id}
               pageIndex={pageIndex}
               selectionMenu={(props: any) => (
-                <SelectionMenu {...props} documentId={doc.id} isLatex={doc.doc_type === 'latex'} onAddToNote={onAddToNote} onToast={showToast} />
+                <SelectionMenu {...props} documentId={doc.id} isLatex={isLatexDoc(doc)} onAddToNote={onAddToNote} onToast={showToast} />
               )}
             />
             <AnnotationLayer documentId={doc.id} pageIndex={pageIndex} />
@@ -1077,31 +869,20 @@ const LoadedViewer: React.FC<DocViewerProps> = ({
         <div className="viewer-toolbar-left" style={{ display: 'flex', alignItems: 'center', gap: '6px', minWidth: 0, flexShrink: 1, overflow: 'hidden' }}>
           {dragHandle && <span className="drag-handle-wrapper" style={{ flexShrink: 0 }}>{dragHandle}</span>}
           <div className="file-name" title={renaming ? `Source: ${doc.name}` : `Source: ${doc.name} (click to rename)`}>
-            {doc.doc_type === 'latex' ? (
+            {isLatexDoc(doc) ? (
               <IconLatex size={13} className="viewer-doc-icon" />
             ) : (
               <IconDoc size={13} className="viewer-doc-icon" />
             )}
             {renaming ? (
-              <input
+              <InlineRenameInput
                 className="inline-rename-input"
-                value={renameValue}
-                autoFocus
-                onFocus={(e) => e.target.select()}
-                onChange={(e) => setRenameValue(e.target.value)}
-                onBlur={() => {
+                initialValue={displayTitle}
+                onCommit={(next) => {
                   setRenaming(false);
-                  if (renameValue.trim() && renameValue.trim() !== displayTitle) {
-                    onRenameDoc?.(doc.id, renameValue);
-                  }
+                  onRenameDoc?.(doc.id, next);
                 }}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
-                  if (e.key === 'Escape') setRenaming(false);
-                }}
-                onClick={(e) => e.stopPropagation()}
-                maxLength={120}
-                placeholder="Enter title"
+                onCancel={() => setRenaming(false)}
               />
             ) : (
               <span
@@ -1109,9 +890,7 @@ const LoadedViewer: React.FC<DocViewerProps> = ({
                 className="name-text"
                 style={onRenameDoc ? { cursor: 'text' } : undefined}
                 onClick={() => {
-                  if (!onRenameDoc) return;
-                  setRenameValue(displayTitle);
-                  setRenaming(true);
+                  if (onRenameDoc) setRenaming(true);
                 }}
               >
                 {displayTitle}
@@ -1179,22 +958,7 @@ const LoadedViewer: React.FC<DocViewerProps> = ({
         onDragLeave={(e) => { e.preventDefault(); setIsDraggingOver(false); }}
         onDrop={(e) => { e.preventDefault(); setIsDraggingOver(false); if (e.dataTransfer.files?.length) onDropFiles(e.dataTransfer.files); }}
         onDoubleClick={(e) => {
-          const pageEl = (e.target as HTMLElement).closest('[data-testid^="core__page-layer-"]') as HTMLElement;
-          if (!pageEl) return;
-          const match = pageEl.getAttribute('data-testid')?.match(/core__page-layer-(\d+)/);
-          if (!match) return;
-          const pageIndex = parseInt(match[1], 10);
-          const rect = pageEl.getBoundingClientRect();
-          if (rect.width <= 0 || rect.height <= 0) return;
-          const fx = Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width));
-          const fy = Math.min(1, Math.max(0, (e.clientY - rect.top) / rect.height));
-          const pdfWidth = 595.28;
-          const pdfHeight = 841.89;
-          window.dispatchEvent(
-            new CustomEvent('rsrch:inverse-sync', {
-              detail: { docId: doc.id, page: pageIndex + 1, x: fx * pdfWidth, y: fy * pdfHeight, fx, fy }
-            })
-          );
+          emitInverseSyncFromPoint(doc.id, e.target as Node, e.clientX, e.clientY);
         }}
       >
         <HighlightRestorer docId={doc.id} />
@@ -1226,11 +990,17 @@ const LoadedViewer: React.FC<DocViewerProps> = ({
 // LoadedViewer (useScroll/useZoom) once the document is registered.
 const InnerViewer: React.FC<DocViewerProps> = (props) => {
   const { doc } = props;
+  const latexPageRestoreRef = useRef<Map<string, number>>(new Map());
+  const latexReloadingRef = useRef<Set<string>>(new Set());
   if (!doc) return null;
-  const displayTitle = doc.note_title || baseName(doc.name);
+  const displayTitle = getDocDisplayName(doc);
   return (
     <div id="docView" className="doc-view">
-      <DocumentKeeper doc={doc} />
+      <DocumentKeeper
+        doc={doc}
+        latexPageRestoreRef={latexPageRestoreRef}
+        latexReloadingRef={latexReloadingRef}
+      />
       <DocumentContent documentId={doc.id}>
         {({ isLoading, isError, isLoaded }) => (
           <>
@@ -1238,7 +1008,7 @@ const InnerViewer: React.FC<DocViewerProps> = (props) => {
               <>
                 <div className="viewer-toolbar">
                   <div className="file-name" title={`Source: ${doc.name}`}>
-                    {doc.doc_type === 'latex' ? (
+                    {isLatexDoc(doc) ? (
                       <IconLatex size={13} className="viewer-doc-icon" />
                     ) : (
                       <IconDoc size={13} className="viewer-doc-icon" />
@@ -1272,7 +1042,13 @@ const InnerViewer: React.FC<DocViewerProps> = (props) => {
                 <div className="pdf-loading-spinner"><span>Failed to load PDF</span></div>
               </div>
             )}
-            {isLoaded && <LoadedViewer {...props} />}
+            {isLoaded && (
+              <LoadedViewer
+                {...props}
+                latexPageRestoreRef={latexPageRestoreRef}
+                latexReloadingRef={latexReloadingRef}
+              />
+            )}
           </>
         )}
       </DocumentContent>
@@ -1306,25 +1082,4 @@ const DocViewerInner: React.FC<DocViewerProps> = (props) => {
   );
 };
 
-export const DocViewer: React.FC<DocViewerProps> = React.memo(
-  DocViewerInner,
-  (prev, next) => {
-    const a = prev.doc;
-    const b = next.doc;
-    if (a?.id !== b?.id) return false;
-    if (a?.name !== b?.name) return false;
-    if (a?.note_title !== b?.note_title) return false;
-    if (a?.bookmarked !== b?.bookmarked) return false;
-    if (a?.has_file !== b?.has_file) return false;
-    if ((a?.file ?? null) !== (b?.file ?? null)) return false;
-    return (
-      prev.onToggleBookmark === next.onToggleBookmark &&
-      prev.onDownloadNotes === next.onDownloadNotes &&
-      prev.onDeleteDoc === next.onDeleteDoc &&
-      prev.onDropFiles === next.onDropFiles &&
-      prev.onAddToNote === next.onAddToNote &&
-      prev.onRenameDoc === next.onRenameDoc &&
-      prev.onClose === next.onClose
-    );
-  }
-);
+export const DocViewer: React.FC<DocViewerProps> = React.memo(DocViewerInner);

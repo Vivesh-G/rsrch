@@ -40,6 +40,8 @@
   --border: #D9D9D9;
   --border-subtle: #E7E7E5;
   --border-strong: #BCBAB4;
+  --border-hover: var(--border-strong);
+  --editor-font-size: 13px;
 
   /* Brand */
   --brand: #0B0B0B;
@@ -527,45 +529,52 @@ body.dark ::selection,
               padding var(--duration-normal) ease;
 }
 
-/* Collapsed sidebar: auto-hide drawer occupying full vertical space.
-   Parks off-canvas leaving only a 3px edge visible + a 20px
-   invisible hover zone, so it reclaims space but slides back
-   over the viewer when the mouse touches the left screen edge. */
-.sidebar.collapsed {
+/* Collapsed sidebars: auto-hide drawers occupying full vertical space */
+.sidebar.collapsed,
+.right-sidebar.collapsed {
   position: absolute;
-  left: 0;
   top: 0;
   bottom: 0;
   height: 100%;
-  width: 260px !important;
-  min-width: 260px;
-  max-width: 260px;
   z-index: 60;
-  transform: translateX(calc(-100% + 3px));
   transition: transform var(--duration-normal) var(--ease-standard),
               box-shadow var(--duration-normal) ease;
   box-shadow: none;
   overflow: hidden;
 }
 
-/* 3px visible edge hint */
-.sidebar.collapsed::after {
+.sidebar.collapsed {
+  left: 0;
+  width: 260px !important;
+  min-width: 260px;
+  max-width: 260px;
+  transform: translateX(calc(-100% + 3px));
+}
+
+.sidebar.collapsed::after,
+.right-sidebar.collapsed::after {
   content: "";
   position: absolute;
   top: 0;
   bottom: 0;
-  right: 0;
   width: 3px;
   background: var(--border-strong);
   opacity: 1;
   pointer-events: none;
 }
 
-/* Full-height invisible grab zone pinned to the leftmost screen edge. */
-.sidebar.collapsed::before {
+.sidebar.collapsed::after {
+  right: 0;
+}
+
+.right-sidebar.collapsed::after {
+  left: 0;
+}
+
+.sidebar.collapsed::before,
+.right-sidebar.collapsed::before {
   content: "";
   position: absolute;
-  left: 100%;
   top: 0;
   bottom: 0;
   width: 24px;
@@ -573,31 +582,33 @@ body.dark ::selection,
   z-index: 59;
 }
 
-.sidebar.collapsed:hover {
+.sidebar.collapsed::before {
+  left: 100%;
+}
+
+.right-sidebar.collapsed::before {
+  right: 100%;
+}
+
+.sidebar.collapsed:hover,
+.sidebar.collapsed:focus-within,
+.right-sidebar.collapsed:hover,
+.right-sidebar.collapsed:focus-within {
   transform: translateX(0);
   box-shadow: var(--shadow-lg);
 }
 
-/* Keyboard/touch users get no hover: reveal the drawer when focus moves
-   inside it, otherwise focused off-canvas controls are invisible. */
-.sidebar.collapsed:focus-within {
-  transform: translateX(0);
-  box-shadow: var(--shadow-lg);
-}
-
-.sidebar.collapsed:hover::before {
+.sidebar.collapsed:hover::before,
+.sidebar.collapsed:focus-within::before,
+.right-sidebar.collapsed:hover::before,
+.right-sidebar.collapsed:focus-within::before {
   display: none;
 }
 
-.sidebar.collapsed:focus-within::before {
-  display: none;
-}
-
-.sidebar.collapsed:hover::after {
-  opacity: 0;
-}
-
-.sidebar.collapsed:focus-within::after {
+.sidebar.collapsed:hover::after,
+.sidebar.collapsed:focus-within::after,
+.right-sidebar.collapsed:hover::after,
+.right-sidebar.collapsed:focus-within::after {
   opacity: 0;
 }
 
@@ -630,75 +641,13 @@ body.dark ::selection,
   z-index: 20;
 }
 
-/* Collapsed right sidebar: full vertical height auto-hide drawer */
 .right-sidebar.collapsed {
-  position: absolute;
   right: 0;
-  top: 0;
-  bottom: 0;
-  height: 100%;
   width: 52px !important;
   min-width: 52px;
   max-width: 52px;
   margin-left: 0;
-  z-index: 60;
   transform: translateX(calc(100% - 3px));
-  transition: transform var(--duration-normal) var(--ease-standard),
-              box-shadow var(--duration-normal) ease;
-  box-shadow: none;
-  overflow: hidden;
-}
-
-/* 3px visible edge hint on the left edge of right sidebar */
-.right-sidebar.collapsed::after {
-  content: "";
-  position: absolute;
-  top: 0;
-  bottom: 0;
-  left: 0;
-  width: 3px;
-  background: var(--border-strong);
-  opacity: 1;
-  pointer-events: none;
-}
-
-/* Invisible grab zone pinned to the right edge */
-.right-sidebar.collapsed::before {
-  content: "";
-  position: absolute;
-  right: 100%;
-  top: 0;
-  bottom: 0;
-  width: 24px;
-  background: transparent;
-  z-index: 59;
-}
-
-.right-sidebar.collapsed:hover {
-  transform: translateX(0);
-  box-shadow: var(--shadow-lg);
-}
-
-/* Keyboard users get no hover: reveal the drawer when focus moves inside. */
-.right-sidebar.collapsed:focus-within {
-  transform: translateX(0);
-  box-shadow: var(--shadow-lg);
-}
-
-.right-sidebar.collapsed:hover::before {
-  display: none;
-}
-
-.right-sidebar.collapsed:focus-within::before {
-  display: none;
-}
-
-.right-sidebar.collapsed:hover::after {
-  opacity: 0;
-}
-
-.right-sidebar.collapsed:focus-within::after {
-  opacity: 0;
 }
 
 .right-sidebar-head {
@@ -1637,8 +1586,7 @@ body.dark .right-sidebar-active-bar {
   font-weight: 400;
 }
 
-.zoom-ctrl #zoomLabel,
-.zoom-ctrl .zoom-text {
+.zoom-ctrl #zoomLabel {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -1716,14 +1664,6 @@ body.dark .right-sidebar-active-bar {
   overscroll-behavior: contain;
 }
 
-.pdf-pages-scroll-stack {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 24px;
-  width: 100%;
-}
-
 .pdf-page-wrapper {
   position: relative;
   display: block;
@@ -1734,12 +1674,6 @@ body.dark .right-sidebar-active-bar {
   box-shadow: 0 12px 32px -4px rgba(0, 0, 0, 0.12), 0 2px 6px rgba(0, 0, 0, 0.04);
   box-sizing: content-box;
   transition: box-shadow var(--duration-normal) ease;
-}
-
-.pdf-page-canvas {
-  display: block;
-  background: #FFFFFF;
-  border-radius: 4px;
 }
 
 /* EmbedPDF renders pages as native <img> (draggable by default), which would
@@ -1783,94 +1717,6 @@ body.dark .pdf-page-wrapper img {
   color: var(--text-tertiary);
   font-family: var(--font-mono);
   font-size: 12px;
-}
-
-/* PDF TEXT LAYER & SELECTION */
-.textLayer {
-  position: absolute;
-  top: 0;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  overflow: hidden;
-  opacity: 1;
-  line-height: 1;
-  text-size-adjust: none;
-  forced-color-adjust: none;
-  transform-origin: 0 0;
-  z-index: 2;
-  user-select: text;
-  -webkit-user-select: text;
-  --min-font-size: 1;
-  --text-scale-factor: calc(var(--total-scale-factor, 1.35) * var(--min-font-size, 1));
-  --min-font-size-inv: calc(1 / var(--min-font-size, 1));
-}
-
-/* Ensure ALL text in textLayer is 100% transparent and selectable */
-.textLayer :is(span, br, div),
-.textLayer span,
-.textLayer br,
-.textLayer div {
-  color: transparent !important;
-  -webkit-text-fill-color: transparent !important;
-  position: absolute;
-  white-space: pre;
-  cursor: text;
-  transform-origin: 0 0;
-}
-
-.textLayer > :not(.markedContent),
-.textLayer .markedContent span:not(.markedContent),
-.textLayer span {
-  z-index: 1;
-  --font-height: 0;
-  font-size: calc(var(--text-scale-factor) * var(--font-height));
-  line-height: 1;
-  --scale-x: 1;
-  --rotate: 0deg;
-  transform: rotate(var(--rotate)) scaleX(var(--scale-x)) scale(var(--min-font-size-inv));
-}
-
-.textLayer .markedContent {
-  display: contents;
-}
-
-.textLayer ::selection {
-  background: rgba(11, 11, 11, 0.28) !important;
-  color: transparent !important;
-  -webkit-text-fill-color: transparent !important;
-}
-
-body.dark .textLayer ::selection {
-  background: rgba(245, 245, 245, 0.32) !important;
-  color: transparent !important;
-  -webkit-text-fill-color: transparent !important;
-}
-
-/* PDF PERSISTENT HIGHLIGHT OVERLAY — above textLayer (z 2) so merged
-   line rects paint solid with no inter-word slits; pointer-events none
-   keeps text selectable. */
-.pdf-page-highlights {
-  position: absolute;
-  top: 0;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  pointer-events: none;
-  z-index: 3;
-}
-
-.pdf-highlight-mark {
-  position: absolute;
-  background: rgba(234, 179, 8, 0.38);
-  border-radius: 2px;
-  mix-blend-mode: multiply;
-  transition: opacity var(--duration-fast) ease;
-}
-
-body.dark .pdf-highlight-mark {
-  background: rgba(250, 204, 21, 0.44);
-  mix-blend-mode: screen;
 }
 
 /* FLOATING PDF SELECTION POPOVER */
@@ -2001,15 +1847,6 @@ body.dark .pdf-highlight-mark {
 }
 
 /* NOTES PANEL */
-.notes-top {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  color: var(--text-tertiary);
-  font-size: 12px;
-  min-height: 28px;
-}
-
 .crumbs {
   overflow: hidden;
   text-overflow: ellipsis;
@@ -2062,20 +1899,6 @@ body.dark .pdf-highlight-mark {
   .crumbs .crumb-sep {
     display: none;
   }
-}
-
-.note-title-input {
-  background: transparent;
-  border: 0;
-  outline: 0;
-  color: var(--text-primary);
-  font-family: var(--font-sans);
-  font-size: 20px;
-  font-weight: 600;
-  letter-spacing: -0.02em;
-  margin: var(--space-2) 0 var(--space-1);
-  width: 100%;
-  padding: 0;
 }
 
 .meta {
@@ -2471,29 +2294,6 @@ body.dark .pdf-highlight-mark {
   text-align: center;
 }
 
-.slash-item-icon {
-  width: 24px;
-  height: 24px;
-  border-radius: 4px;
-  background: var(--surface-subtle);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-family: var(--font-mono);
-  font-size: 10.5px;
-  font-weight: 600;
-  flex-shrink: 0;
-  border: 1px solid var(--border);
-  color: var(--text-secondary);
-}
-
-.slash-item:hover .slash-item-icon,
-.slash-item.active .slash-item-icon {
-  background: var(--brand);
-  color: var(--text-inverse);
-  border-color: var(--brand);
-}
-
 .slash-item-info {
   flex: 1;
   min-width: 0;
@@ -2534,6 +2334,7 @@ body.dark .pdf-highlight-mark {
 /* CODEMIRROR LATEX EDITOR CURSOR & ACTIVE LINE */
 .cm-content {
   caret-color: var(--text-primary) !important;
+  font-size: var(--editor-font-size, 13px);
 }
 
 .cm-cursor,
@@ -4010,31 +3811,6 @@ input { font: inherit; }
 
 .citation-badge:active {
   transform: translateY(0.5px);
-}
-
-.pdf-page-ref {
-  background: var(--surface-subtle);
-  border: 1px solid var(--border);
-  color: var(--text-primary);
-  border-radius: var(--radius-sm);
-  padding: 1px 6px;
-  font-size: 11px;
-  font-weight: 500;
-  font-family: var(--font-mono);
-  cursor: pointer;
-  display: inline-flex;
-  align-items: center;
-  margin: 0 2px;
-  vertical-align: baseline;
-  transition: all var(--duration-fast) ease;
-  user-select: none;
-}
-
-.pdf-page-ref:hover {
-  background: var(--brand);
-  color: var(--text-inverse);
-  border-color: var(--brand);
-  transform: translateY(-0.5px);
 }
 
 /* Quick Action Chips */

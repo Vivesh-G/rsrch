@@ -2,9 +2,24 @@ from typing import Optional, List
 from pydantic import BaseModel, Field
 import time
 
+from config import (
+    CHAT_MAX_DOCS,
+    CHAT_MAX_WORKSPACES,
+    DEFAULT_AI_PERSONA,
+    DEFAULT_AI_TEMPERATURE,
+    DEFAULT_AUTO_COMPILE_DELAY,
+    DEFAULT_EDITOR_FONT_SIZE,
+    DEFAULT_EDITOR_LINE_NUMBERS,
+    DEFAULT_EDITOR_WORD_WRAP,
+    DEFAULT_USER_AFFILIATION,
+    DEFAULT_USER_NAME,
+    MAX_NOTE_CHARS,
+    settings,
+)
+
 
 class NoteBase(BaseModel):
-    content: str = Field(default="", max_length=200_000)
+    content: str = Field(default="", max_length=MAX_NOTE_CHARS)
 
 
 class NoteResponse(NoteBase):
@@ -24,7 +39,6 @@ class DocumentUpdate(BaseModel):
     note_title: Optional[str] = Field(default=None, max_length=120)
     tag: Optional[str] = Field(default=None, min_length=1, max_length=30)
     bookmarked: Optional[bool] = None
-    doc_type: Optional[str] = Field(default=None, max_length=10)
 
 
 class DocumentResponse(DocumentBase):
@@ -99,8 +113,8 @@ class ChatSendRequest(BaseModel):
     message: str = Field(min_length=1, max_length=4000)
     # Cap matches WORKSPACE_CONTEXT_DOCS in server.py: the UI context picker
     # can multi-add, so the bound must cover every doc that can reach context.
-    document_ids: List[str] = Field(default_factory=list, max_length=6)
-    workspace_ids: List[str] = Field(default_factory=list, max_length=2)
+    document_ids: List[str] = Field(default_factory=list, max_length=CHAT_MAX_DOCS)
+    workspace_ids: List[str] = Field(default_factory=list, max_length=CHAT_MAX_WORKSPACES)
     api_key: Optional[str] = Field(default=None, max_length=200)
     model: Optional[str] = Field(default=None, max_length=60)
 
@@ -110,17 +124,17 @@ class ChatSendResponse(BaseModel):
 
 
 class SettingsResponse(BaseModel):
-    user_name: str = "Researcher"
-    user_affiliation: str = ""
-    gemini_model: str = "gemini-3.5-flash-lite"
+    user_name: str = DEFAULT_USER_NAME
+    user_affiliation: str = DEFAULT_USER_AFFILIATION
+    gemini_model: str = settings.gemini_model
     gemini_api_key_set: bool = False
     gemini_api_key_masked: str = ""
-    ai_temperature: float = 0.7
-    ai_persona: str = "academic"
-    auto_compile_delay: int = 1500
-    editor_font_size: int = 13
-    editor_word_wrap: bool = True
-    editor_line_numbers: bool = True
+    ai_temperature: float = DEFAULT_AI_TEMPERATURE
+    ai_persona: str = DEFAULT_AI_PERSONA
+    auto_compile_delay: int = DEFAULT_AUTO_COMPILE_DELAY
+    editor_font_size: int = DEFAULT_EDITOR_FONT_SIZE
+    editor_word_wrap: bool = DEFAULT_EDITOR_WORD_WRAP
+    editor_line_numbers: bool = DEFAULT_EDITOR_LINE_NUMBERS
 
 
 class SettingsUpdate(BaseModel):
@@ -134,4 +148,12 @@ class SettingsUpdate(BaseModel):
     editor_font_size: Optional[int] = Field(default=None, ge=10, le=24)
     editor_word_wrap: Optional[bool] = None
     editor_line_numbers: Optional[bool] = None
+
+
+class BibtexUpdate(BaseModel):
+    content: str = Field(default="", max_length=MAX_NOTE_CHARS)
+
+
+class TestKeyPayload(BaseModel):
+    api_key: Optional[str] = None
 

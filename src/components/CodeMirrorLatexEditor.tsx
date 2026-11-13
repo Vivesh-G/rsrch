@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState, useMemo, useCallback } from 'react';
-import { EditorState, StateField, Prec } from '@codemirror/state';
+import { Compartment, EditorState, StateField, Prec } from '@codemirror/state';
 import {
   EditorView,
   lineNumbers,
@@ -11,6 +11,7 @@ import {
   highlightActiveLineGutter,
 } from '@codemirror/view';
 import type { Tooltip } from '@codemirror/view';
+import type { CompileDiagnostic } from '../types';
 import { defaultKeymap, history, historyKeymap } from '@codemirror/commands';
 import { StreamLanguage } from '@codemirror/language';
 import { stex } from '@codemirror/legacy-modes/mode/stex';
@@ -18,8 +19,13 @@ import { snippet, nextSnippetField, prevSnippetField, clearSnippet, autocompleti
 import { lintGutter, setDiagnostics, linter } from '@codemirror/lint';
 import { katexPlugin } from './katexDecoration';
 import { LATEX_SLASH_COMMANDS, type LatexSlashCommand } from './latexAutocomplete';
+import { SLASH_MENU_BOUNDS, SLASH_TRIGGER_RE, SlashCommandMenu } from './SlashCommandMenu';
+import { useOutsideClick } from '../hooks/useOutsideClick';
 import { api } from '../services/api';
-import { fetchAndParseSynctex, invalidateSynctexCache, syncTexLineToRect, syncTexRectToLine } from '../utils/synctex';
+import { countWords } from '../utils/document';
+import { computePopoverCoords } from '../utils/dom';
+import { consumePendingInverseSync, emitEvent, onEvent, type InverseSyncPayload } from '../utils/events';
+import { syncTexLineToRect, syncTexRectToLine } from '../utils/synctex';
 import { IconSparkles } from './Icons';
 
 const selectionTooltip = StateField.define<Tooltip | null>({
@@ -75,11 +81,9 @@ function getCursorTooltip(state: EditorState): Tooltip | null {
       btn.onclick = (e) => {
         e.preventDefault();
         e.stopPropagation();
-        window.dispatchEvent(
-          new CustomEvent('rsrch:chat-append', {
-            detail: { text: 'Regarding this LaTeX block:\n```latex\n' + selectedText + '\n```\n' },
-          })
-        );
+        emitEvent('chat-append', {
+          text: 'Regarding this LaTeX block:\n```latex\n' + selectedText + '\n```\n',
+        });
       };
 
       dom.appendChild(btn);
@@ -100,6 +104,8 @@ interface CodeMirrorLatexEditorProps {
   onChange: (content: string) => void;
   onManualSave?: (content: string) => void;
   onWordCountChange?: (count: number) => void;
+  wordWrap?: boolean;
+  lineNumbers?: boolean;
 }
 
 export const CodeMirrorLatexEditor: React.FC<CodeMirrorLatexEditorProps> = ({
@@ -109,6 +115,8 @@ export const CodeMirrorLatexEditor: React.FC<CodeMirrorLatexEditorProps> = ({
   onChange,
   onManualSave,
   onWordCountChange,
+  wordWrap = true,
+  lineNumbers: showLineNumbers = true,
 }) => {
   const editorRef = useRef<HTMLDivElement>(null);
   const viewRef = useRef<EditorView | null>(null);
@@ -117,14 +125,16 @@ export const CodeMirrorLatexEditor: React.FC<CodeMirrorLatexEditorProps> = ({
   const docIdRef = useRef(docId);
   const workspaceIdRef = useRef(workspaceId);
   workspaceIdRef.current = workspaceId;
-  const contentRef = useRef(content);
-  contentRef.current = content;
   const onChangeRef = useRef(onChange);
   onChangeRef.current = onChange;
+  const onManualSaveRef = useRef(onManualSave);
+  onManualSaveRef.current = onManualSave;
   const onWordCountRef = useRef(onWordCountChange);
   onWordCountRef.current = onWordCountChange;
+  const lineNumbersCompartmentRef = useRef(new Compartment());
+  const wordWrapCompartmentRef = useRef(new Compartment());
 
-  const [activeErrors, setActiveErrors] = useState<{ line: number | null; message: string; severity: string }[]>([]);
+  const [activeErrors, setActiveErrors] = useState<CompileDiagnostic[]>([]);
   const diagnosticsRef = useRef<any[]>([]);
 
   // Slash commands popup state
@@ -152,53 +162,51 @@ export const CodeMirrorLatexEditor: React.FC<CodeMirrorLatexEditorProps> = ({
     if (!workspaceId) return;
     const fetchBib = async () => {
       try {
-        const res = await fetch(`${api.baseUrl}/workspaces/${workspaceId}/bibtex`);
-        if (res.ok) {
-          const data = await res.json();
-          const content = data.content || '';
-          
-          const entries = [];
-          const regex = /@\w+\s*{\s*([^,]+),/g;
-          let match;
-          while ((match = regex.exec(content)) !== null) {
-            const key = match[1].trim();
-            const nextAt = content.indexOf('@', match.index + 1);
-            const entryContent = nextAt === -1 ? content.slice(match.index) : content.slice(match.index, nextAt);
-            
-            // Allow matching curly braces or quotes, handles newlines
-            const titleMatch = entryContent.match(/title\s*=\s*[{"]([^}"]*)[}"]/i);
-            const authorMatch = entryContent.match(/author\s*=\s*[{"]([^}"]*)[}"]/i);
-            const yearMatch = entryContent.match(/year\s*=\s*[{"]?(\d+)[}"]?/i);
-            
-            entries.push({
-              key,
-              title: titleMatch ? titleMatch[1].replace(/\s+/g, ' ') : 'Unknown Title',
-              author: authorMatch ? authorMatch[1].replace(/\s+/g, ' ') : 'Unknown Author',
-              year: yearMatch ? yearMatch[1] : '',
-            });
-          }
-          setBibEntries(entries);
+        const content = await api.getBibtex(workspaceId);
+        if (!content) {
+          setBibEntries([]);
+          return;
         }
+
+        const entries = [];
+        const regex = /@\w+\s*{\s*([^,]+),/g;
+        let match;
+        while ((match = regex.exec(content)) !== null) {
+          const key = match[1].trim();
+          const nextAt = content.indexOf('@', match.index + 1);
+          const entryContent = nextAt === -1 ? content.slice(match.index) : content.slice(match.index, nextAt);
+          
+          // Allow matching curly braces or quotes, handles newlines
+          const titleMatch = entryContent.match(/title\s*=\s*[{"]([^}"]*)[}"]/i);
+          const authorMatch = entryContent.match(/author\s*=\s*[{"]([^}"]*)[}"]/i);
+          const yearMatch = entryContent.match(/year\s*=\s*[{"]?(\d+)[}"]?/i);
+          
+          entries.push({
+            key,
+            title: titleMatch ? titleMatch[1].replace(/\s+/g, ' ') : 'Unknown Title',
+            author: authorMatch ? authorMatch[1].replace(/\s+/g, ' ') : 'Unknown Author',
+            year: yearMatch ? yearMatch[1] : '',
+          });
+        }
+        setBibEntries(entries);
       } catch (e) {
         console.error('Failed to parse bibtex for autocomplete', e);
       }
     };
     fetchBib();
-    
-    window.addEventListener('rsrch:bibtex-updated', fetchBib);
-    return () => window.removeEventListener('rsrch:bibtex-updated', fetchBib);
+
+    return onEvent('bibtex-updated', fetchBib);
   }, [workspaceId]);
 
   useEffect(() => {
-    const handleInverseSync = (e: Event) => {
+    const runInverseSync = (detail: InverseSyncPayload) => {
       const currentDocId = docIdRef.current;
-      const detail = (e as CustomEvent).detail;
       if (!detail || detail.docId !== currentDocId) return;
       if (detail.page == null || detail.x == null || detail.y == null) {
         console.warn('Go to Block: incomplete click coordinates', detail);
         return;
       }
-      fetchAndParseSynctex(currentDocId).then((data) => {
+      api.getSynctex(currentDocId).then((data) => {
         if (!data) {
           console.warn('Go to Block: no SyncTeX data (compile may have failed)');
           return;
@@ -229,25 +237,33 @@ export const CodeMirrorLatexEditor: React.FC<CodeMirrorLatexEditorProps> = ({
         }
       }).catch((err) => console.warn('Go to Block failed:', err));
     };
-    const handleCompiled = () => invalidateSynctexCache(docIdRef.current);
-    window.addEventListener('rsrch:inverse-sync', handleInverseSync);
-    window.addEventListener('rsrch:latex-compiled', handleCompiled);
+
+    const pending = consumePendingInverseSync(docId);
+    if (pending) {
+      runInverseSync(pending);
+    }
+
+    const unsubSync = onEvent('inverse-sync', runInverseSync);
+    const unsubCompiled = onEvent('latex-compiled', () => api.invalidateSynctexCache(docIdRef.current));
     return () => {
-      window.removeEventListener('rsrch:inverse-sync', handleInverseSync);
-      window.removeEventListener('rsrch:latex-compiled', handleCompiled);
+      unsubSync();
+      unsubCompiled();
     };
   }, [docId]);
 
   const bibEntriesRef = useRef(bibEntries);
   bibEntriesRef.current = bibEntries;
-  
+
   const slashMenuRef = useRef(slashMenu);
   slashMenuRef.current = slashMenu;
 
-  const menuListRef = useRef<HTMLDivElement>(null);
   const menuContainerRef = useRef<HTMLDivElement>(null);
+  const closeSlashMenu = useCallback(
+    () => setSlashMenu((prev) => (prev.open ? { ...prev, open: false } : prev)),
+    [],
+  );
+  useOutsideClick(menuContainerRef, slashMenu.open, closeSlashMenu);
 
-  // Filter commands by query
   const filteredCommands = useMemo(() => {
     const q = slashMenu.query.trim().toLowerCase();
     if (!q) return LATEX_SLASH_COMMANDS;
@@ -263,17 +279,6 @@ export const CodeMirrorLatexEditor: React.FC<CodeMirrorLatexEditorProps> = ({
   const filteredCommandsRef = useRef(filteredCommands);
   filteredCommandsRef.current = filteredCommands;
 
-  // Auto-scroll active item into view
-  useEffect(() => {
-    if (slashMenu.open && menuListRef.current) {
-      const activeEl = menuListRef.current.querySelector('.slash-item.active') as HTMLElement | null;
-      if (activeEl) {
-        activeEl.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
-      }
-    }
-  }, [slashMenu.selectedIndex, slashMenu.open]);
-
-  // Execute Slash Command
   const executeCommand = useCallback((cmd: LatexSlashCommand) => {
     const view = viewRef.current;
     if (!view) return;
@@ -297,8 +302,7 @@ export const CodeMirrorLatexEditor: React.FC<CodeMirrorLatexEditorProps> = ({
       if (v.docChanged) {
         const newContent = v.state.doc.toString();
 
-        // Compute word count
-        const words = (newContent.trim().match(/\S+/g) || []).length;
+        const words = countWords(newContent);
         if (words !== lastWordCountRef.current) {
           lastWordCountRef.current = words;
           onWordCountRef.current?.(words);
@@ -322,7 +326,7 @@ export const CodeMirrorLatexEditor: React.FC<CodeMirrorLatexEditorProps> = ({
         const line = v.state.doc.lineAt(head);
         const col = head - line.from;
         const beforeCaret = line.text.slice(0, col);
-        const slashMatch = beforeCaret.match(/(?:^|\s)\/([a-zA-Z0-9_-]*)$/);
+        const slashMatch = beforeCaret.match(SLASH_TRIGGER_RE);
 
         if (slashMatch) {
           const query = slashMatch[1].toLowerCase();
@@ -332,21 +336,19 @@ export const CodeMirrorLatexEditor: React.FC<CodeMirrorLatexEditorProps> = ({
           const coords = v.view.coordsAtPos(head);
 
           if (coords) {
-            const menuWidth = 300;
-            const menuHeight = 320;
-            const posX = Math.max(16, Math.min(coords.left, window.innerWidth - menuWidth - 20));
-            const posY =
-              coords.bottom + menuHeight > window.innerHeight
-                ? Math.max(16, coords.top - menuHeight - 6)
-                : coords.bottom + 6;
-
+            const { left, top } = computePopoverCoords(
+              coords,
+              SLASH_MENU_BOUNDS.width,
+              SLASH_MENU_BOUNDS.height,
+              SLASH_MENU_BOUNDS.margin,
+            );
             setSlashMenu({
               open: true,
               query,
               from,
               to: head,
-              x: posX,
-              y: posY,
+              x: left,
+              y: top,
               selectedIndex: 0,
             });
             return;
@@ -356,6 +358,15 @@ export const CodeMirrorLatexEditor: React.FC<CodeMirrorLatexEditorProps> = ({
         setSlashMenu((prev) => (prev.open ? { ...prev, open: false } : prev));
       }
     });
+
+    const runSelectedSlashCommand = () => {
+      if (!slashMenuRef.current.open) return false;
+      const cmds = filteredCommandsRef.current;
+      if (cmds.length === 0) return false;
+      const selected = cmds[slashMenuRef.current.selectedIndex] || cmds[0];
+      if (selected) executeCommandRef.current(selected);
+      return true;
+    };
 
     const slashMenuKeymap = Prec.highest(
       keymap.of([
@@ -385,32 +396,8 @@ export const CodeMirrorLatexEditor: React.FC<CodeMirrorLatexEditorProps> = ({
             return true;
           },
         },
-        {
-          key: 'Enter',
-          run: () => {
-            if (!slashMenuRef.current.open) return false;
-            const cmds = filteredCommandsRef.current;
-            if (cmds.length === 0) return false;
-            const selected = cmds[slashMenuRef.current.selectedIndex] || cmds[0];
-            if (selected) {
-              executeCommandRef.current(selected);
-            }
-            return true;
-          },
-        },
-        {
-          key: 'Tab',
-          run: () => {
-            if (!slashMenuRef.current.open) return false;
-            const cmds = filteredCommandsRef.current;
-            if (cmds.length === 0) return false;
-            const selected = cmds[slashMenuRef.current.selectedIndex] || cmds[0];
-            if (selected) {
-              executeCommandRef.current(selected);
-            }
-            return true;
-          },
-        },
+        { key: 'Enter', run: runSelectedSlashCommand },
+        { key: 'Tab', run: runSelectedSlashCommand },
         {
           key: 'Escape',
           run: () => {
@@ -433,7 +420,7 @@ export const CodeMirrorLatexEditor: React.FC<CodeMirrorLatexEditorProps> = ({
           const docStr = view.state.doc.toString();
           if (debounceTimerRef.current) clearTimeout(debounceTimerRef.current);
           onChangeRef.current(docStr);
-          onManualSave?.(docStr);
+          onManualSaveRef.current?.(docStr);
           return true;
         },
       },
@@ -451,22 +438,18 @@ export const CodeMirrorLatexEditor: React.FC<CodeMirrorLatexEditorProps> = ({
                 e.preventDefault();
                 const currentDocId = docIdRef.current;
                 // Forward sync: parse synctex and scroll PDF
-                fetchAndParseSynctex(currentDocId).then((data) => {
+                api.getSynctex(currentDocId).then((data) => {
                   if (!data) return;
                   const rect = syncTexLineToRect(data, line);
                   if (rect) {
-                    window.dispatchEvent(
-                      new CustomEvent('rsrch:scroll-to-rect', {
-                        detail: {
-                          docId: currentDocId,
-                          page: rect.page,
-                          x: rect.left,
-                          y: rect.bottom,
-                          width: rect.width || 5, // Fallback width if missing
-                          height: rect.height || 10,
-                        },
-                      })
-                    );
+                    emitEvent('scroll-to-rect', {
+                      docId: currentDocId,
+                      page: rect.page,
+                      x: rect.left,
+                      y: rect.bottom,
+                      width: rect.width || 5,
+                      height: rect.height || 10,
+                    });
                   } else {
                     console.warn('No SyncTeX block found for this line. (Preamble or non-typeset line?)');
                   }
@@ -481,13 +464,9 @@ export const CodeMirrorLatexEditor: React.FC<CodeMirrorLatexEditorProps> = ({
                 e.preventDefault();
                 const pos = view.posAtCoords({ x: e.clientX, y: e.clientY });
                 if (pos !== null) {
-                  // Upload to backend
-                  const formData = new FormData();
-                  formData.append('files', file);
-                  fetch(`${api.baseUrl}/workspaces/${workspaceIdRef.current}/assets`, {
-                    method: 'POST',
-                    body: formData,
-                  }).catch(err => console.error("Drop upload failed", err));
+                  api.uploadWorkspaceAssets(workspaceIdRef.current, [file]).catch((err) =>
+                    console.error('Drop upload failed', err)
+                  );
 
                   // Insert template
                   const template = `\\begin{figure}[htbp]\n  \\centering\n  \\includegraphics[width=\\linewidth]{figures/${file.name}}\n  \\caption{${file.name}}\n\\end{figure}\n`;
@@ -521,8 +500,10 @@ export const CodeMirrorLatexEditor: React.FC<CodeMirrorLatexEditorProps> = ({
             }
           ]
         }),
-        lineNumbers(),
-        highlightActiveLineGutter(),
+        lineNumbersCompartmentRef.current.of(
+          showLineNumbers ? [lineNumbers(), highlightActiveLineGutter()] : []
+        ),
+        wordWrapCompartmentRef.current.of(wordWrap ? EditorView.lineWrapping : []),
         highlightActiveLine(),
         history(),
         drawSelection(),
@@ -536,7 +517,7 @@ export const CodeMirrorLatexEditor: React.FC<CodeMirrorLatexEditorProps> = ({
         selectionTooltip,
         onUpdate,
         EditorView.theme({
-          '&': { height: '100%', fontSize: '14px', backgroundColor: 'transparent', color: 'var(--text-primary)' },
+          '&': { height: '100%', fontSize: 'var(--editor-font-size, 14px)', backgroundColor: 'transparent', color: 'var(--text-primary)' },
           '.cm-scroller': { overflow: 'auto', fontFamily: 'var(--font-mono, monospace)', lineHeight: '1.6' },
           '.cm-content': { padding: '16px 16px 16px 12px', minHeight: '100%', caretColor: 'var(--text-primary)' },
           '&.cm-focused': { outline: 'none' },
@@ -632,13 +613,6 @@ export const CodeMirrorLatexEditor: React.FC<CodeMirrorLatexEditorProps> = ({
     });
     viewRef.current = view;
 
-    const handleOutsideClick = (e: MouseEvent) => {
-      if (menuContainerRef.current && !menuContainerRef.current.contains(e.target as Node)) {
-        setSlashMenu((prev) => (prev.open ? { ...prev, open: false } : prev));
-      }
-    };
-    window.addEventListener('mousedown', handleOutsideClick);
-
     const handleScroll = () => {
       if (slashMenuRef.current.open && viewRef.current) {
         const sel = viewRef.current.state.selection.main;
@@ -647,26 +621,43 @@ export const CodeMirrorLatexEditor: React.FC<CodeMirrorLatexEditorProps> = ({
           setSlashMenu((prev) => (prev.open ? { ...prev, open: false } : prev));
           return;
         }
-        const menuWidth = 300;
-        const menuHeight = 320;
-        const posX = Math.max(16, Math.min(coords.left, window.innerWidth - menuWidth - 20));
-        const posY =
-          coords.bottom + menuHeight > window.innerHeight
-            ? Math.max(16, coords.top - menuHeight - 6)
-            : coords.bottom + 6;
-
-        setSlashMenu((prev) => ({ ...prev, x: posX, y: posY }));
+        const { left, top } = computePopoverCoords(
+          coords,
+          SLASH_MENU_BOUNDS.width,
+          SLASH_MENU_BOUNDS.height,
+          SLASH_MENU_BOUNDS.margin,
+        );
+        setSlashMenu((prev) => ({ ...prev, x: left, y: top }));
       }
     };
     view.scrollDOM.addEventListener('scroll', handleScroll);
 
     return () => {
-      view.destroy();
-      window.removeEventListener('mousedown', handleOutsideClick);
       view.scrollDOM.removeEventListener('scroll', handleScroll);
+      view.destroy();
       if (debounceTimerRef.current) clearTimeout(debounceTimerRef.current);
     };
   }, []); // Run once on mount
+
+  useEffect(() => {
+    const view = viewRef.current;
+    if (!view) return;
+    view.dispatch({
+      effects: lineNumbersCompartmentRef.current.reconfigure(
+        showLineNumbers ? [lineNumbers(), highlightActiveLineGutter()] : []
+      ),
+    });
+  }, [showLineNumbers]);
+
+  useEffect(() => {
+    const view = viewRef.current;
+    if (!view) return;
+    view.dispatch({
+      effects: wordWrapCompartmentRef.current.reconfigure(
+        wordWrap ? EditorView.lineWrapping : []
+      ),
+    });
+  }, [wordWrap]);
 
   // Sync external content: full replace on doc switch; otherwise only
   // accept external updates when the editor is empty or from external edits
@@ -703,84 +694,32 @@ export const CodeMirrorLatexEditor: React.FC<CodeMirrorLatexEditorProps> = ({
   }, [docId, content]);
 
   useEffect(() => {
-    const handleApply = (e: Event) => {
-      const detail = (e as CustomEvent).detail;
-      if (detail?.code != null && viewRef.current) {
-        const view = viewRef.current;
-        const selection = view.state.selection.main;
-        const code = String(detail.code);
-        view.dispatch({
-          changes: { from: selection.from, to: selection.to, insert: code },
-          selection: { anchor: selection.from, head: selection.from + code.length },
-        });
-        view.focus();
-        if (debounceTimerRef.current) clearTimeout(debounceTimerRef.current);
-        onChangeRef.current(view.state.doc.toString());
-      }
-    };
-    
-    const handleInsert = (e: Event) => {
-      const detail = (e as CustomEvent).detail;
-      if (detail?.code != null && viewRef.current) {
-        const view = viewRef.current;
-        const selection = view.state.selection.main;
-        const code = String(detail.code);
-        // Insert at caret (selection.from), don't replace
-        view.dispatch({
-          changes: { from: selection.from, to: selection.from, insert: code },
-          selection: { anchor: selection.from + code.length },
-        });
-        view.focus();
-        if (debounceTimerRef.current) clearTimeout(debounceTimerRef.current);
-        onChangeRef.current(view.state.doc.toString());
-      }
+    const applyCode = (rawCode: unknown, replaceSelection: boolean) => {
+      if (rawCode == null || !viewRef.current) return;
+      const view = viewRef.current;
+      const selection = view.state.selection.main;
+      const code = String(rawCode);
+      view.dispatch({
+        changes: { from: selection.from, to: replaceSelection ? selection.to : selection.from, insert: code },
+        selection: replaceSelection
+          ? { anchor: selection.from, head: selection.from + code.length }
+          : { anchor: selection.from + code.length },
+      });
+      view.focus();
+      if (debounceTimerRef.current) clearTimeout(debounceTimerRef.current);
+      onChangeRef.current(view.state.doc.toString());
     };
 
-    // Ask AI to fix the compiler error. The real source lines around the
-    // failure are attached HERE, because the backend only has the chat context
-    // doc — for a long .tex file that context is nowhere near the error site.
-    const handleAskAiFix = (e: Event) => {
-      const detail = (e as CustomEvent).detail;
-      const message = String(detail?.message ?? '');
-      const line = Number(detail?.line) || 1;
-      if (!message || !viewRef.current) return;
-      const doc = viewRef.current.state.doc;
-      const ctxStart = Math.max(1, line - 12);
-      const ctxEnd = Math.min(doc.lines, line + 12);
-      const startFrom = (ctxStart >= 1 && ctxStart <= doc.lines) ? doc.line(ctxStart).from : 0;
-      const endTo = (ctxEnd >= 1 && ctxEnd <= doc.lines) ? doc.line(ctxEnd).to : doc.length;
-      const contextText = doc.sliceString(startFrom, endTo);
-      window.dispatchEvent(new CustomEvent('rsrch:chat-send', {
-        detail: {
-          message: [
-            '/fix Here is a Tectonic LaTeX error:',
-            '',
-            message,
-            '',
-            `The error is on line ${line} of ${doc.lines}. Source around it:`,
-            '',
-            '```latex',
-            contextText,
-            '```',
-          ].join('\n'),
-          type: 'latex_error',
-        },
-      }));
-    };
-
-    window.addEventListener('rsrch:latex-apply', handleApply);
-    window.addEventListener('rsrch:latex-insert', handleInsert);
-    window.addEventListener('rsrch:latex-ask-ai-fix', handleAskAiFix);
+    const unsubApply = onEvent('latex-apply', (d) => applyCode(d?.code, true));
+    const unsubInsert = onEvent('latex-insert', (d) => applyCode(d?.code, false));
     return () => {
-        window.removeEventListener('rsrch:latex-apply', handleApply);
-        window.removeEventListener('rsrch:latex-insert', handleInsert);
-        window.removeEventListener('rsrch:latex-ask-ai-fix', handleAskAiFix);
+      unsubApply();
+      unsubInsert();
     };
   }, []);
 
   useEffect(() => {
-    const handleErrors = (e: Event) => {
-      const detail = (e as CustomEvent).detail;
+    const unsubErrors = onEvent('latex-errors', (detail) => {
       if (detail && detail.docId === docId && viewRef.current) {
         const view = viewRef.current;
         const doc = view.state.doc;
@@ -811,10 +750,9 @@ export const CodeMirrorLatexEditor: React.FC<CodeMirrorLatexEditorProps> = ({
         diagnosticsRef.current = cmDiagnostics;
         view.dispatch(setDiagnostics(view.state, cmDiagnostics));
       }
-    };
+    });
 
-    const handleCompiled = (e: Event) => {
-      const detail = (e as CustomEvent).detail;
+    const unsubCompiled = onEvent('latex-compiled', (detail) => {
       if (detail && detail.docId === docId && viewRef.current) {
         setActiveErrors([]);
         diagnosticsRef.current = [];
@@ -822,17 +760,38 @@ export const CodeMirrorLatexEditor: React.FC<CodeMirrorLatexEditorProps> = ({
           viewRef.current.dispatch(setDiagnostics(viewRef.current.state, []));
         } catch {}
       }
-    };
+    });
 
-    window.addEventListener('rsrch:latex-errors', handleErrors);
-    window.addEventListener('rsrch:latex-compiled', handleCompiled);
     return () => {
-      window.removeEventListener('rsrch:latex-errors', handleErrors);
-      window.removeEventListener('rsrch:latex-compiled', handleCompiled);
+      unsubErrors();
+      unsubCompiled();
     };
   }, [docId]);
 
-  const handleJumpToError = (lineNo: number | null) => {
+  const askAiFix = useCallback((message: string, line: number) => {
+    if (!message || !viewRef.current) return;
+    const doc = viewRef.current.state.doc;
+    const ctxStart = Math.max(1, line - 12);
+    const ctxEnd = Math.min(doc.lines, line + 12);
+    const startFrom = ctxStart >= 1 && ctxStart <= doc.lines ? doc.line(ctxStart).from : 0;
+    const endTo = ctxEnd >= 1 && ctxEnd <= doc.lines ? doc.line(ctxEnd).to : doc.length;
+    const contextText = doc.sliceString(startFrom, endTo);
+    emitEvent('chat-send', {
+      message: [
+        '/fix Here is a Tectonic LaTeX error:',
+        '',
+        message,
+        '',
+        `The error is on line ${line} of ${doc.lines}. Source around it:`,
+        '',
+        '```latex',
+        contextText,
+        '```',
+      ].join('\n'),
+    });
+  }, []);
+
+  const handleJumpToError = (lineNo?: number | null) => {
     if (!viewRef.current || !lineNo) return;
     const view = viewRef.current;
     const clampedLine = Math.min(Math.max(1, lineNo), view.state.doc.lines);
@@ -858,44 +817,17 @@ export const CodeMirrorLatexEditor: React.FC<CodeMirrorLatexEditorProps> = ({
       <div ref={editorRef} style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }} />
 
       {/* Floating Slash Commands Menu (Consistent with Notes UI) */}
-      {slashMenu.open && (
-        <div
-          ref={menuContainerRef}
-          className="slash-menu"
-          style={{ top: `${slashMenu.y}px`, left: `${slashMenu.x}px` }}
-          onMouseDown={(e) => e.preventDefault()}
-        >
-          <div className="slash-menu-head">
-            <span>Blocks & Tools</span>
-            <kbd onClick={() => setSlashMenu((prev) => ({ ...prev, open: false }))}>ESC to close</kbd>
-          </div>
-          <div className="slash-menu-list" ref={menuListRef}>
-            {filteredCommands.length === 0 ? (
-              <div className="slash-menu-empty">No matching commands</div>
-            ) : (
-              filteredCommands.map((cmd, idx) => {
-                const isSelected = idx === slashMenu.selectedIndex;
-                return (
-                  <button
-                    key={cmd.id}
-                    className={`slash-item ${isSelected ? 'active' : ''}`}
-                    onClick={() => executeCommand(cmd)}
-                    type="button"
-                    onMouseEnter={() => setSlashMenu((prev) => ({ ...prev, selectedIndex: idx }))}
-                  >
-                    <span className="slash-item-badge">{cmd.badge}</span>
-                    <div className="slash-item-info">
-                      <div className="slash-item-title">{cmd.label}</div>
-                      <div className="slash-item-desc">{cmd.description}</div>
-                    </div>
-                    {isSelected && <span className="slash-item-hint">↵</span>}
-                  </button>
-                );
-              })
-            )}
-          </div>
-        </div>
-      )}
+      <SlashCommandMenu
+        open={slashMenu.open}
+        x={slashMenu.x}
+        y={slashMenu.y}
+        selectedIndex={slashMenu.selectedIndex}
+        items={filteredCommands}
+        onSelect={executeCommand}
+        onHoverIndex={(idx) => setSlashMenu((prev) => ({ ...prev, selectedIndex: idx }))}
+        onClose={() => setSlashMenu((prev) => ({ ...prev, open: false }))}
+        containerRef={menuContainerRef}
+      />
 
       {activeErrors.length > 0 && (
         <div
@@ -961,14 +893,7 @@ export const CodeMirrorLatexEditor: React.FC<CodeMirrorLatexEditorProps> = ({
               <button
                 type="button"
                 className="latex-error-btn primary"
-                onClick={() => {
-                  window.dispatchEvent(new CustomEvent('rsrch:latex-ask-ai-fix', {
-                    detail: {
-                      message: activeErrors[0].message,
-                      line: activeErrors[0].line || 1,
-                    },
-                  }));
-                }}
+                onClick={() => askAiFix(activeErrors[0].message, activeErrors[0].line || 1)}
               >
                 <IconSparkles size={12} />
                 <span>Fix with AI</span>

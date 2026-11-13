@@ -42,8 +42,6 @@ def _is_frozen() -> bool:
 _BACKEND_ENV = _backend_dir() / ".env"
 load_dotenv(_BACKEND_ENV, override=False)
 
-_FILE_DEFAULTS: dict[str, str] = {}
-
 
 def _load_file_defaults() -> dict[str, str]:
     path = _backend_dir() / ".config"
@@ -119,6 +117,19 @@ _DATA_DIR = _data_dir()
 _DIST_DIR = _dist_dir()
 
 
+DEFAULT_USER_NAME = "Researcher"
+DEFAULT_USER_AFFILIATION = ""
+DEFAULT_AI_TEMPERATURE = 0.7
+DEFAULT_AI_PERSONA = "academic"
+DEFAULT_AUTO_COMPILE_DELAY = 1500
+DEFAULT_EDITOR_FONT_SIZE = 13
+DEFAULT_EDITOR_WORD_WRAP = True
+DEFAULT_EDITOR_LINE_NUMBERS = True
+MAX_NOTE_CHARS = 200_000
+CHAT_MAX_DOCS = 6
+CHAT_MAX_WORKSPACES = 2
+
+
 @dataclass(frozen=True)
 class Settings:
     """Frozen process-wide config. Constructed once; never reloaded."""
@@ -128,7 +139,7 @@ class Settings:
         default_factory=lambda: _get_int("MAX_UPLOAD_MB", 50) * 1024 * 1024
     )
     max_extracted_chars: int = field(
-        default_factory=lambda: _get_int("MAX_EXTRACTED_CHARS", 200_000)
+        default_factory=lambda: _get_int("MAX_EXTRACTED_CHARS", MAX_NOTE_CHARS)
     )
     chat_context_chars: int = field(
         default_factory=lambda: _get_int("CHAT_CONTEXT_CHARS", 30_000)
@@ -147,6 +158,9 @@ class Settings:
     )
     gemini_model: str = field(
         default_factory=lambda: _get_str("GEMINI_MODEL", "gemini-3.5-flash-lite")
+    )
+    gemini_api_key: str = field(
+        default_factory=lambda: _raw("GEMINI_API_KEY", "").strip()
     )
 
     # --- LaTeX build cache bounds ---
@@ -195,6 +209,9 @@ class Settings:
     @property
     def frontend_index(self) -> Path:
         return self.dist_dir / "index.html"
+
+    def workspace_assets_dir(self, workspace_id: str) -> Path:
+        return self.data_dir / "workspaces" / workspace_id / "assets"
 
     def ensure_dirs(self) -> None:
         """Create writable dirs once at startup. Call from lifespan, not per-request."""

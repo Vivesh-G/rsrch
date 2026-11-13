@@ -1,21 +1,16 @@
 import os
-import glob
-import re
 import uuid
 import asyncio
-import time
 import mimetypes
-from collections import deque
-from typing import List, Optional, Dict, Deque, cast
+from typing import List, Optional
 from contextlib import asynccontextmanager
 import logging
 
-from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Query, Request
+from fastapi import FastAPI, HTTPException, Request, UploadFile, File, Form, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pathlib import Path, PureWindowsPath
-from pydantic import BaseModel, Field
 
 from database import (
     init_db,
@@ -39,14 +34,24 @@ from database import (
     get_chat_messages,
     add_chat_message,
     get_all_settings,
-    get_setting,
     set_settings,
     search_chunks,
     get_workspace_documents,
-    _dedupe_pages,
+    dedupe_pages,
+    store_chunks,
+    get_unindexed_pdf_docs,
 )
-from config import settings
+from config import (
+    CHAT_MAX_DOCS,
+    CHAT_MAX_WORKSPACES,
+    DEFAULT_AUTO_COMPILE_DELAY,
+    DEFAULT_EDITOR_FONT_SIZE,
+    DEFAULT_EDITOR_LINE_NUMBERS,
+    DEFAULT_EDITOR_WORD_WRAP,
+    settings,
+)
 from models import (
+    BibtexUpdate,
     WorkspaceResponse,
     WorkspaceBase,
     WorkspaceUpdate,
@@ -62,32 +67,24 @@ from models import (
     ChatSendResponse,
     SettingsResponse,
     SettingsUpdate,
+    TestKeyPayload,
 )
 
-from compiler import run_compile, get_build_key, prune_all_builds
-import pymupdf
+from compiler import get_build_artifact, prune_all_builds, run_compile
+from chunker import chunk_pages, chunk_pdf, extract_pdf_pages
 import httpx
 import dspy
-from ai.config import get_dspy_lm
+from ai.config import get_dspy_lm, resolve_ai_config
+from ai.modules.latex_copilot import FixTectonicModule, SafeLatexModule
 from ai.modules.paper_qa import GroundedPaperQAModule
+from rate_limiter import ChatRateLimiter, RateLimitExceeded
+from citations import (
+    strip_page_citations,
+    sanitize_output,
+    extract_page_citations,
+)
 
 logger = logging.getLogger("rsrch.server")
-
-# All tunables live in config.settings (loaded once from backend/.env at
-# startup, frozen until restart). No os.getenv / load_dotenv here.
-MAX_UPLOAD_BYTES = settings.max_upload_bytes
-MAX_EXTRACTED_CHARS = settings.max_extracted_chars
-CHAT_CONTEXT_CHARS = settings.chat_context_chars
-CHAT_HISTORY_LIMIT = settings.chat_history_limit
-CHAT_TIMEOUT_S = settings.chat_timeout_s
-CHAT_RATE_LIMIT = settings.chat_rate_limit
-CHAT_RATE_WINDOW_S = settings.chat_rate_window_s
-# Cap on total context docs per chat send: explicit document_ids (max 3) plus
-# workspace-resolved docs fill the remainder.
-WORKSPACE_CONTEXT_DOCS = 6
-# Hard cap on explicitly attached documents in one send. Mirrors
-# ChatSendRequest.document_ids so the UI can pre-warn instead of 422-ing.
-MAX_ATTACHED_DOCS = 6
 
 # Background fire-and-forget tasks must be strongly referenced: CPython only
 # holds a weak reference to a running task, so an unreferenced task can be
@@ -100,113 +97,45 @@ def _spawn_background(coro, *, name: str) -> "asyncio.Task":
     task = asyncio.ensure_future(coro)
     _background_tasks.add(task)
     task.add_done_callback(_background_tasks.discard)
-    try:
-        task.set_name(name)
-    except AttributeError:
-        pass
+    task.set_name(name)
     return task
 
 
-_genai_client = None
-
-def get_genai_client():
-    global _genai_client
-    if _genai_client is None:
-        _genai_client = genai.Client()
-    return _genai_client
-
-_chat_hits: Dict[str, Deque[float]] = {}
-_chat_sweep_at = 0.0
-
-
-def check_chat_rate_limit(chat_id: str) -> None:
-    """Per-key sliding window. O(1): only touches this chat's deque.
-    Global expiry now runs at most once per window to bound dict growth.
-    """
-    global _chat_sweep_at
-    now = time.monotonic()
-    hits = _chat_hits.setdefault(chat_id, deque())
-    while hits and now - hits[0] > CHAT_RATE_WINDOW_S:
-        hits.popleft()
-    if len(hits) >= CHAT_RATE_LIMIT:
-        raise HTTPException(status_code=429, detail="Too many chat requests, slow down")
-    hits.append(now)
-
-    if now - _chat_sweep_at > CHAT_RATE_WINDOW_S:
-        _chat_sweep_at = now
-        for key in list(_chat_hits):
-            if key == chat_id:
-                continue
-            q = _chat_hits[key]
-            while q and now - q[0] > CHAT_RATE_WINDOW_S:
-                q.popleft()
-            if not q:
-                del _chat_hits[key]
-
-
-# Matches [p. 3], [p. 3, p. 7], [pp. 10-12], [pp. 10–12] and combinations.
-# Defined once so stripping, parsing and the frontend badge regex stay aligned.
-_CITATION_BODY = (
-    r"\[p{1,2}s?\.\s*\d+(?:\s*[-\u2013]\s*\d+)?"
-    r"(?:\s*,\s*(?:p{1,2}s?\.\s*)?\d+(?:\s*[-\u2013]\s*\d+)?)*\]"
+chat_limiter = ChatRateLimiter(
+    limit=settings.chat_rate_limit,
+    window_s=settings.chat_rate_window_s,
 )
-_PAGE_CITATION_RE = re.compile(_CITATION_BODY)
-# Same marker, but it also swallows the whitespace in front of it so removing a
-# mid-sentence citation doesn't leave "word , word" or a double space.
-_STRIPPABLE_CITATION_RE = re.compile(r"[ \t]*" + _CITATION_BODY)
 
 
-def _strip_page_citations(text: str) -> str:
-    """Remove [p. N] / [p. N, p. M] / [pp. N-M] markers from generated text."""
-    return _STRIPPABLE_CITATION_RE.sub("", text or "")
-
-
-def _sanitize_output(text: str) -> str:
-    """Remove leaked DSPy delimiter tags (e.g. [[ ## completed ## ]]) from model text."""
-    if not text:
-        return ""
-    # Strip [[ ## completed ## ]] or [[ ## field ## ]]
-    cleaned = re.sub(r"\[\[\s*##.*?##\s*\]*\]?", "", text)
-    # Strip standalone [[ ## completed ## or similar unfinished brackets
-    cleaned = re.sub(r"\[\[\s*##\s*completed\b.*", "", cleaned, flags=re.IGNORECASE)
-    return cleaned.strip()
-
-
-def _extract_page_citations(text: str) -> list[int]:
-    """Backup citation parse: every page number inside any [p. ...] marker.
-
-    Handles the same forms as `_strip_page_citations`, so a model that cites
-    `[pp. 10-12]` still yields clickable badges (10, 11, 12) rather than none.
-    """
-    pages: set[int] = set()
-    for marker in _PAGE_CITATION_RE.finditer(text or ""):
-        for chunk in marker.group().strip("[]").split(","):
-            # Expand "10-12" into 10, 11, 12 so each page is individually clickable.
-            nums = [int(n) for n in re.findall(r"\d+", chunk)]
-            if len(nums) == 2 and re.search(r"\d\s*[-\u2013]\s*\d", chunk):
-                lo, hi = sorted(nums)
-                # Guard against a typo'd huge range.
-                if 0 < lo <= hi <= lo + 500:
-                    pages.update(range(lo, hi + 1))
-                    continue
-            pages.update(nums)
-    return sorted(pages)
-
-
-def _extract_pdf(saved_path: str) -> tuple[str, int]:
-    """Blocking pymupdf parse — always run in a worker thread."""
-    log = logging.getLogger("rsrch.pdf")
-    parts: list[str] = []
-    page_count = 1
+async def _stream_upload_to_path(
+    file: UploadFile, dest: Path, max_bytes: int
+) -> tuple[int, bytes]:
+    """Stream an UploadFile to `dest` with bounded memory and clean size-cap cleanup."""
+    total = 0
+    first_chunk = b""
+    too_large = False
     try:
-        with pymupdf.open(saved_path) as pdf_document:
-            page_count = pdf_document.page_count
-            for page_num in range(page_count):
-                page = pdf_document.load_page(page_num)
-                parts.append(cast(str, page.get_text()))
-    except Exception as e:
-        log.warning("Failed to extract PDF text from %s: %s", saved_path, e)
-    return "".join(parts), page_count
+        with open(dest, "wb") as out:
+            while True:
+                chunk = await file.read(1024 * 1024)
+                if not chunk:
+                    break
+                if not first_chunk:
+                    first_chunk = chunk
+                total += len(chunk)
+                if total > max_bytes:
+                    too_large = True
+                    break
+                out.write(chunk)
+    finally:
+        await file.close()
+    if too_large:
+        try:
+            dest.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise HTTPException(status_code=413, detail="File too large")
+    return total, first_chunk
 
 
 def _is_pdf_bytes(data: bytes) -> bool:
@@ -223,6 +152,7 @@ def _is_pdf_bytes(data: bytes) -> bool:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    settings.ensure_dirs()
     await init_db()
     # Reclaim disk from the pre-cap era: enforce per-doc/global bounds once
     # at startup, off the event loop so boot isn't blocked by huge folders.
@@ -251,6 +181,11 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Rsrch API", version="1.0.0", lifespan=lifespan)
 
+
+@app.exception_handler(RateLimitExceeded)
+async def rate_limit_handler(_request: Request, exc: RateLimitExceeded):
+    return JSONResponse(status_code=429, content={"detail": str(exc)})
+
 # CORS origins are frozen in config.settings (backend/.env -> CORS_ORIGINS).
 # NOTE: a wildcard origin cannot be combined with credentials (browsers
 # reject it) — lock this to the local dev server in production.
@@ -268,7 +203,6 @@ async def health():
     return {"status": "ok", "app": "Rsrch"}
 
 
-# Workspaces
 @app.get("/api/workspaces", response_model=List[WorkspaceResponse])
 async def list_workspaces():
     return await get_all_workspaces()
@@ -296,7 +230,6 @@ async def delete_ws(ws_id: str):
     return {"success": True, "id": ws_id}
 
 
-# Documents
 @app.post("/api/workspaces/{ws_id}/documents/upload", response_model=DocumentResponse)
 async def upload_document(
     ws_id: str,
@@ -321,56 +254,30 @@ async def upload_document(
 
     # Never persist attacker-controlled extensions (.html/.svg/.exe);
     # stored bytes are validated PDFs, always saved as .pdf.
-    saved_path = str(settings.pdf_dir / f"{doc_id}.pdf")
+    saved_path = settings.pdf_dir / f"{doc_id}.pdf"
     settings.pdf_dir.mkdir(parents=True, exist_ok=True)
 
     # Streamed upload: 1 MB chunks, enforce size cap as we go so a
     # 50 MB+ body never sits fully in RAM twice. First chunk carries
     # the magic-byte check (BOM/whitespace tolerant).
-    total = 0
-    first_chunk: bytes | None = None
-    too_large = False
-    try:
-        with open(saved_path, "wb") as out:
-            while True:
-                chunk = await file.read(1024 * 1024)
-                if not chunk:
-                    break
-                if first_chunk is None:
-                    first_chunk = chunk
-                total += len(chunk)
-                if total > MAX_UPLOAD_BYTES:
-                    too_large = True
-                    break
-                out.write(chunk)
-    finally:
-        await file.close()
-    if too_large:
-        # Remove the truncated partial file we streamed before rejecting it;
-        # otherwise every oversized upload leaks a file into data/pdfs/ that
-        # is never referenced by a DB row and is never pruned.
-        try:
-            os.remove(saved_path)
-        except OSError:
-            pass
-        raise HTTPException(status_code=413, detail="File too large")
+    total, first_chunk = await _stream_upload_to_path(
+        file, saved_path, settings.max_upload_bytes
+    )
     if total == 0:
-        try:
-            os.remove(saved_path)
-        except OSError:
-            pass
+        saved_path.unlink(missing_ok=True)
         raise HTTPException(status_code=400, detail="Empty file")
-    if not _is_pdf_bytes(first_chunk or b""):
-        try:
-            os.remove(saved_path)
-        except OSError:
-            pass
+    if not _is_pdf_bytes(first_chunk):
+        saved_path.unlink(missing_ok=True)
         raise HTTPException(status_code=400, detail="Only PDF files are accepted")
 
     # CPU-bound parse off the event loop so one big PDF doesn't stall all
-    # other requests; truncate so the DB row and chat context stay bounded.
-    extracted_text, page_count = await asyncio.to_thread(_extract_pdf, saved_path)
-    extracted_text = extracted_text[:MAX_EXTRACTED_CHARS]
+    # other requests; read pages once and reuse them for both text and FTS chunks.
+    try:
+        pages, page_count = await asyncio.to_thread(extract_pdf_pages, str(saved_path))
+    except Exception as e:
+        logger.warning("Failed to extract PDF text from %s: %s", saved_path, e)
+        pages, page_count = [], 1
+    extracted_text = "".join(pages)[: settings.max_extracted_chars]
 
     doc = await create_document(
         doc_id=doc_id,
@@ -378,17 +285,15 @@ async def upload_document(
         name=file_name,
         note_title=clean_title,
         tag=clean_tag,
-        file_path=saved_path,
+        file_path=str(saved_path),
         page_count=page_count,
         extracted_text=extracted_text,
         doc_type="pdf",
     )
-    
-    async def _index_document_chunks(d_id: str, f_path: str):
-        from chunker import chunk_pdf
-        from database import store_chunks
+
+    async def _index_document_chunks(d_id: str, page_texts: list[str]):
         try:
-            chunks = await asyncio.to_thread(chunk_pdf, f_path)
+            chunks = await asyncio.to_thread(chunk_pages, page_texts)
             await store_chunks(d_id, chunks)
             logger.info("Indexed %d chunks for %s", len(chunks), d_id)
         except Exception:
@@ -396,7 +301,7 @@ async def upload_document(
             logger.exception("Failed to index chunks for %s", d_id)
 
     _spawn_background(
-        _index_document_chunks(doc_id, saved_path),
+        _index_document_chunks(doc_id, pages),
         name=f"index-chunks:{doc_id[:8]}",
     )
 
@@ -405,9 +310,6 @@ async def upload_document(
 
 async def _backfill_chunks() -> None:
     """Chunk PDFs that predate the FTS index (see lifespan)."""
-    from chunker import chunk_pdf
-    from database import get_unindexed_pdf_docs, store_chunks
-
     try:
         pending = await get_unindexed_pdf_docs()
     except Exception:
@@ -464,19 +366,16 @@ async def list_workspace_assets(ws_id: str):
     ws = await get_workspace(ws_id)
     if not ws:
         raise HTTPException(status_code=404, detail="Workspace not found")
-        
-    assets_dir = settings.data_dir / "workspaces" / ws_id / "assets"
+
+    assets_dir = settings.workspace_assets_dir(ws_id)
     if not assets_dir.exists():
         return {"assets": []}
-        
-    assets = []
-    # Using glob to find all files recursively
-    for filepath in assets_dir.rglob("*"):
-        if filepath.is_file():
-            # Get relative path for frontend
-            rel_path = filepath.relative_to(assets_dir).as_posix()
-            assets.append({"path": rel_path})
-            
+
+    assets = [
+        {"path": filepath.relative_to(assets_dir).as_posix()}
+        for filepath in assets_dir.rglob("*")
+        if filepath.is_file()
+    ]
     return {"assets": assets}
 
 @app.post("/api/workspaces/{ws_id}/assets")
@@ -484,7 +383,7 @@ async def upload_workspace_assets(ws_id: str, files: List[UploadFile] = File(...
     ws = await get_workspace(ws_id)
     if not ws:
         raise HTTPException(status_code=404, detail="Workspace not found")
-        
+
     # Prevent directory traversal (incl. absolute paths: on Windows
     # `base / "C:/evil"` discards base and writes to C:/evil, and the
     # pre-existing ".." substring check misses that entirely).
@@ -494,23 +393,17 @@ async def upload_workspace_assets(ws_id: str, files: List[UploadFile] = File(...
     clean_path = raw_path.strip("/")
     if (
         ".." in Path(clean_path).parts
-        or ".." in clean_path
-        or clean_path.startswith(("/", "\\"))
         or Path(clean_path).is_absolute()
         or PureWindowsPath(clean_path).is_absolute()
     ):
         raise HTTPException(status_code=400, detail="Invalid path")
 
-    assets_root = settings.data_dir / "workspaces" / ws_id / "assets"
+    assets_root = settings.workspace_assets_dir(ws_id)
     target_dir = assets_root / clean_path
-    try:
-        inside = target_dir.resolve().is_relative_to(assets_root.resolve())
-    except AttributeError:  # Python < 3.9 fallback
-        inside = str(target_dir.resolve()).startswith(str(assets_root.resolve()))
-    if not inside:
+    if not target_dir.resolve().is_relative_to(assets_root.resolve()):
         raise HTTPException(status_code=400, detail="Invalid path")
     target_dir.mkdir(parents=True, exist_ok=True)
-    
+
     uploaded = []
     for file in files:
         if not file.filename:
@@ -523,56 +416,39 @@ async def upload_workspace_assets(ws_id: str, files: List[UploadFile] = File(...
         if "/" in safe_name or "\\" in safe_name:
             raise HTTPException(status_code=400, detail="Invalid filename")
 
-        file_target_dir = target_dir
-        if safe_name.lower().endswith(('.sty', '.cls', '.bst')):
-            file_target_dir = settings.data_dir / "workspaces" / ws_id / "assets"
-
+        file_target_dir = (
+            assets_root
+            if safe_name.lower().endswith((".sty", ".cls", ".bst"))
+            else target_dir
+        )
         file_target_dir.mkdir(parents=True, exist_ok=True)
         save_path = file_target_dir / safe_name
 
-        total = 0
-        too_large = False
-        with open(save_path, "wb") as out:
-            while True:
-                chunk = await file.read(1024 * 1024)
-                if not chunk:
-                    break
-                total += len(chunk)
-                if total > MAX_UPLOAD_BYTES:
-                    too_large = True
-                    break
-                out.write(chunk)
-        if too_large:
-            try:
-                save_path.unlink(missing_ok=True)
-            except OSError:
-                pass
-            raise HTTPException(status_code=413, detail="File too large")
-        
-        rel_path = save_path.relative_to(settings.data_dir / "workspaces" / ws_id / "assets").as_posix()
+        await _stream_upload_to_path(file, save_path, settings.max_upload_bytes)
+
+        rel_path = save_path.relative_to(assets_root).as_posix()
         uploaded.append({"path": rel_path, "filename": safe_name})
-        
+
     return {"status": "success", "uploaded": uploaded}
 
-class BibtexUpdate(BaseModel):
-    content: str = Field(default="", max_length=200_000)
 
 @app.get("/api/workspaces/{ws_id}/bibtex")
 async def get_bibtex(ws_id: str):
     ws = await get_workspace(ws_id)
     if not ws:
         raise HTTPException(status_code=404, detail="Workspace not found")
-    bib_path = settings.data_dir / "workspaces" / ws_id / "assets" / "references.bib"
+    bib_path = settings.workspace_assets_dir(ws_id) / "references.bib"
     if bib_path.exists():
         return {"content": bib_path.read_text(encoding="utf-8", errors="replace")}
     return {"content": ""}
+
 
 @app.put("/api/workspaces/{ws_id}/bibtex")
 async def save_bibtex(ws_id: str, data: BibtexUpdate):
     ws = await get_workspace(ws_id)
     if not ws:
         raise HTTPException(status_code=404, detail="Workspace not found")
-    assets_dir = settings.data_dir / "workspaces" / ws_id / "assets"
+    assets_dir = settings.workspace_assets_dir(ws_id)
     assets_dir.mkdir(parents=True, exist_ok=True)
     bib_path = assets_dir / "references.bib"
     bib_path.write_text(data.content, encoding="utf-8")
@@ -595,24 +471,19 @@ async def get_doc_synctex(doc_id: str):
 
     note = await get_note(doc_id)
     source_content = note.get("content", "")
-    build_key = get_build_key(source_content, f"{doc_id}.tex")
-    synctex_path = str(settings.latex_builds_dir / build_key / f"{doc_id}.synctex.gz")
-    
-    if not await asyncio.to_thread(os.path.exists, synctex_path):
-        # Fallback to the latest successful build
-        pattern = str(settings.latex_builds_dir / "*" / f"{doc_id}.synctex.gz")
-        st_files = await asyncio.to_thread(glob.glob, pattern)
-        if st_files:
-            synctex_path = await asyncio.to_thread(max, st_files, key=os.path.getmtime)
-        else:
-            raise HTTPException(status_code=404, detail="SyncTeX not found")
-            
+    synctex_path = await asyncio.to_thread(
+        get_build_artifact, doc_id, ".synctex.gz", source_content
+    )
+    if not synctex_path:
+        raise HTTPException(status_code=404, detail="SyncTeX not found")
+
     return FileResponse(
-        path=synctex_path,
+        path=str(synctex_path),
         media_type="text/plain",
         filename=f"{doc_id}.synctex",
-        headers={"Content-Encoding": "gzip", "Cache-Control": "no-store"}
+        headers={"Content-Encoding": "gzip", "Cache-Control": "no-store"},
     )
+
 
 @app.get("/api/documents/{doc_id}/file")
 async def get_doc_file(doc_id: str):
@@ -623,28 +494,22 @@ async def get_doc_file(doc_id: str):
     if doc.get("doc_type") == "latex":
         note = await get_note(doc_id)
         source_content = note.get("content", "")
-        build_key = get_build_key(source_content, f"{doc_id}.tex")
-        pdf_path = str(settings.latex_builds_dir / build_key / f"{doc_id}.pdf")
-        # Filesystem probes run off the event loop (was: blocking
-        # os.path.exists / glob.glob inline in the async handler).
-        if not await asyncio.to_thread(os.path.exists, pdf_path):
-            result = await run_compile(doc_id, source_content, workspace_id=doc["workspace_id"])
-            if result.status != "success":
-                # Fallback to the latest successful build
-                pattern = str(settings.latex_builds_dir / "*" / f"{doc_id}.pdf")
-                pdfs = await asyncio.to_thread(glob.glob, pattern)
-                if pdfs:
-                    pdf_path = await asyncio.to_thread(max, pdfs, key=os.path.getmtime)
-                else:
-                    # No successful build exists yet (e.g. brand-new doc with
-                    # invalid default content). 404 keeps the viewer in its
-                    # loading/empty state instead of a 500 crash loop; the
-                    # real diagnostics come via POST /compile.
-                    raise HTTPException(status_code=404, detail="PDF not compiled yet")
-            elif not await asyncio.to_thread(os.path.exists, pdf_path):
+        pdf_path = await asyncio.to_thread(
+            get_build_artifact, doc_id, ".pdf", source_content
+        )
+        if not pdf_path:
+            await run_compile(doc_id, source_content, workspace_id=doc["workspace_id"])
+            pdf_path = await asyncio.to_thread(
+                get_build_artifact, doc_id, ".pdf", source_content
+            )
+            if not pdf_path:
+                # No successful build exists yet (e.g. brand-new doc with
+                # invalid default content). 404 keeps the viewer in its
+                # loading/empty state instead of a 500 crash loop; the
+                # real diagnostics come via POST /compile.
                 raise HTTPException(status_code=404, detail="PDF not compiled yet")
         return FileResponse(
-            path=pdf_path,
+            path=str(pdf_path),
             media_type="application/pdf",
             filename=doc["name"].replace(".tex", ".pdf"),
             headers={"Accept-Ranges": "bytes", "Cache-Control": "no-store"},
@@ -696,7 +561,6 @@ async def delete_doc(doc_id: str):
     return {"success": True, "id": doc_id}
 
 
-# Notes
 @app.get("/api/documents/{doc_id}/note", response_model=NoteResponse)
 async def read_doc_note(doc_id: str):
     doc = await get_document(doc_id)
@@ -713,7 +577,6 @@ async def save_doc_note(doc_id: str, data: NoteBase):
     return await save_note(doc_id, data.content)
 
 
-# Search
 @app.get("/api/search", response_model=SearchResponse)
 async def search(q: str = Query(..., min_length=1)):
     results = await search_all(q)
@@ -738,7 +601,7 @@ async def get_chat_msgs(chat_id: str, limit: int = 200):
     chat = await get_chat(chat_id)
     if not chat:
         raise HTTPException(status_code=404, detail="Chat not found")
-    return await get_chat_messages(chat_id, limit=max(1, min(limit, 500)))
+    return await get_chat_messages(chat_id, limit=limit)
 
 
 @app.post("/api/chats/{chat_id}/messages", response_model=ChatSendResponse)
@@ -747,23 +610,23 @@ async def send_chat_message(chat_id: str, request: ChatSendRequest):
     if not chat:
         raise HTTPException(status_code=404, detail="Chat not found")
 
-    check_chat_rate_limit(chat_id)
+    chat_limiter.check(chat_id)
 
     # Resolve context docs (skip missing — chats outlive documents).
-    # Explicit document_ids first (deduped, capped at MAX_ATTACHED_DOCS); then
+    # Explicit document_ids first (deduped, capped at CHAT_MAX_DOCS); then
     # attached workspaces fill the remainder with their PDF/LaTeX docs up to
-    # WORKSPACE_CONTEXT_DOCS total.
+    # CHAT_MAX_DOCS total.
     context_docs = []
     seen_doc_ids: set = set()
-    for doc_id in (request.document_ids or [])[:MAX_ATTACHED_DOCS]:
+    for doc_id in (request.document_ids or [])[:CHAT_MAX_DOCS]:
         if doc_id in seen_doc_ids:
             continue
         doc = await get_document(doc_id)
         if doc:
             seen_doc_ids.add(doc["id"])
             context_docs.append(doc)
-    for ws_id in (request.workspace_ids or [])[:2]:
-        if len(context_docs) >= WORKSPACE_CONTEXT_DOCS:
+    for ws_id in (request.workspace_ids or [])[:CHAT_MAX_WORKSPACES]:
+        if len(context_docs) >= CHAT_MAX_DOCS:
             break
         try:
             ws_docs = await get_workspace_documents(ws_id)
@@ -771,7 +634,7 @@ async def send_chat_message(chat_id: str, request: ChatSendRequest):
             logger.warning("Workspace context resolve failed for %s: %s", ws_id, ws_err)
             continue
         for ws_doc in ws_docs:
-            if len(context_docs) >= WORKSPACE_CONTEXT_DOCS:
+            if len(context_docs) >= CHAT_MAX_DOCS:
                 break
             if ws_doc["id"] in seen_doc_ids:
                 continue
@@ -787,11 +650,13 @@ async def send_chat_message(chat_id: str, request: ChatSendRequest):
     await add_chat_message(chat_id, primary_doc_id, role="user", content=request.message)
 
     db_settings = await get_all_settings()
-    db_key = db_settings.get("gemini_api_key", "").strip()
-    env_key = os.environ.get("GEMINI_API_KEY", "").strip()
-    effective_key = (request.api_key or "").strip() or db_key or env_key
+    ai_cfg = resolve_ai_config(
+        db_settings,
+        model_override=request.model,
+        api_key_override=request.api_key,
+    )
 
-    if not effective_key:
+    if not ai_cfg.api_key:
         fallback_msg = (
             "**Gemini API Key Required**\n\n"
             "Please configure your Gemini API Key in **Settings** (click your profile or the gear icon in the top right) to enable AI research assistance.\n\n"
@@ -800,27 +665,20 @@ async def send_chat_message(chat_id: str, request: ChatSendRequest):
         saved_msg = await add_chat_message(chat_id, primary_doc_id, role="assistant", content=fallback_msg)
         return {"message": saved_msg}
 
-    effective_model = (request.model or "").strip() or (db_settings.get("gemini_model") or "").strip() or settings.gemini_model
-    if not effective_model or effective_model.strip().lower() == "none":
-        effective_model = settings.gemini_model
-    effective_persona = db_settings.get("ai_persona", "academic")
-    user_name = db_settings.get("user_name", "Researcher")
-    affiliation = db_settings.get("user_affiliation", "")
+    persona_prefix = f"You are assisting {ai_cfg.user_name}"
+    if ai_cfg.affiliation:
+        persona_prefix += f" ({ai_cfg.affiliation})"
 
-    persona_prefix = f"You are assisting {user_name}"
-    if affiliation:
-        persona_prefix += f" ({affiliation})"
-
-    if effective_persona == "academic":
+    if ai_cfg.persona == "academic":
         persona_style = (
             "Provide rigorous, academically sound explanations with accurate citations. "
             "Use LaTeX ONLY for mathematical equations or variables. "
             "Do NOT wrap regular text, percentages, or plain numbers in math mode ($...$). "
             "Use standard Markdown for formatting (e.g., **bold**, *italics*)."
         )
-    elif effective_persona == "concise":
+    elif ai_cfg.persona == "concise":
         persona_style = "Be direct, concise, and prioritize high-density key points or summaries."
-    elif effective_persona == "pedagogical":
+    elif ai_cfg.persona == "pedagogical":
         persona_style = "Explain concepts clearly step-by-step with intuitive examples and derivations."
     else:
         persona_style = ""
@@ -828,7 +686,7 @@ async def send_chat_message(chat_id: str, request: ChatSendRequest):
     formatted_context = []
     if context_docs:
         # Even split of the char budget across every context doc.
-        per_doc = max(1, CHAT_CONTEXT_CHARS // len(context_docs))
+        per_doc = max(1, settings.chat_context_chars // len(context_docs))
         # LaTeX docs: the source IS the context. Label them by file name (which
         # carries the .tex extension) so the model can talk about "main.tex".
         for doc in context_docs:
@@ -846,7 +704,7 @@ async def send_chat_message(chat_id: str, request: ChatSendRequest):
                 logger.warning("Chunk search failed, using extracted_text fallback: %s", search_err)
                 chunk_hits = []
             if chunk_hits:
-                per_hit = max(1, CHAT_CONTEXT_CHARS // len(chunk_hits))
+                per_hit = max(1, settings.chat_context_chars // len(chunk_hits))
                 labels = {d["id"]: (d.get("note_title") or d.get("name") or "Document") for d in pdf_docs}
                 for hit in chunk_hits:
                     section = hit.get("section") or ""
@@ -863,12 +721,10 @@ async def send_chat_message(chat_id: str, request: ChatSendRequest):
                         formatted_context.append(f"[p. ? | {label}]: {fallback}")
 
     # Bounded history: most recent N of THIS chat, chronological.
-    history = await get_chat_messages(chat_id, limit=CHAT_HISTORY_LIMIT)
+    history = await get_chat_messages(chat_id, limit=settings.chat_history_limit)
     formatted_history = [f"{m['role'].capitalize()}: {m['content']}" for m in history]
 
-    dspy_lm = await get_dspy_lm(
-        effective_model, api_key_override=(request.api_key or "").strip() or None
-    )
+    dspy_lm = get_dspy_lm(config=ai_cfg)
     msg_text = request.message.strip()
 
     # `/fix` must never leak its command prefix into the compiler error log.
@@ -883,12 +739,11 @@ async def send_chat_message(chat_id: str, request: ChatSendRequest):
         # One thread owns the DSPy context: no nested thread hops inside.
         with dspy.context(lm=dspy_lm):
             if command == "/latex":
-                from ai.modules.latex_copilot import SafeLatexModule
                 latex_result = SafeLatexModule()(
                     context=list(formatted_context),
                     instruction=instruction,
                 )
-                latex_code = _sanitize_output(_strip_page_citations(latex_result.latex_code or ""))
+                latex_code = sanitize_output(strip_page_citations(latex_result.latex_code or ""))
                 return {
                     "answer": f"Here is the generated LaTeX:\n\n```latex\n{latex_code}\n```",
                     "cited_pages": [],
@@ -896,17 +751,14 @@ async def send_chat_message(chat_id: str, request: ChatSendRequest):
                     "action_type": "latex_patch",
                 }
             if command == "/fix":
-                from ai.signatures import FixTectonicError
-                from ai.modules.latex_copilot import _strip_code_fences
-                fix_result = dspy.ChainOfThought(FixTectonicError)(
+                fix_result = FixTectonicModule()(
                     error_log=instruction,
                     latex_context="\n".join(formatted_context),
                 )
-                raw_code = _strip_code_fences(getattr(fix_result, "corrected_code", "") or "")
-                fixed_code = _sanitize_output(_strip_page_citations(raw_code))
-                fix_expl = (getattr(fix_result, "explanation", "") or "").strip()
+                fixed_code = sanitize_output(strip_page_citations(fix_result.corrected_code or ""))
+                fix_expl = fix_result.explanation or ""
                 if not has_pdf_context:
-                    fix_expl = _strip_page_citations(fix_expl)
+                    fix_expl = strip_page_citations(fix_expl)
                 return {
                     "answer": f"{fix_expl}\n\n```latex\n{fixed_code}\n```",
                     "cited_pages": [],
@@ -920,14 +772,14 @@ async def send_chat_message(chat_id: str, request: ChatSendRequest):
                 chat_history=formatted_history,
                 question=msg_text,
             )
-            answer_text = _sanitize_output((getattr(qa_result, "answer", "") or "").strip())
+            answer_text = (getattr(qa_result, "answer", "") or "").strip()
             if not has_pdf_context:
-                answer_text = _strip_page_citations(answer_text)
+                answer_text = strip_page_citations(answer_text)
                 cited_pages: list[int] = []
             else:
-                cited_pages = _dedupe_pages(getattr(qa_result, "cited_pages", None) or [])
+                cited_pages = dedupe_pages(getattr(qa_result, "cited_pages", None) or [])
                 if not cited_pages:
-                    cited_pages = _extract_page_citations(answer_text)
+                    cited_pages = extract_page_citations(answer_text)
             return {
                 "answer": answer_text,
                 "cited_pages": cited_pages,
@@ -937,7 +789,7 @@ async def send_chat_message(chat_id: str, request: ChatSendRequest):
 
     try:
         generated = await asyncio.wait_for(
-            asyncio.to_thread(_generate), timeout=CHAT_TIMEOUT_S
+            asyncio.to_thread(_generate), timeout=settings.chat_timeout_s
         )
     except asyncio.TimeoutError:
         generated = {
@@ -955,11 +807,11 @@ async def send_chat_message(chat_id: str, request: ChatSendRequest):
             "action_type": None,
         }
 
-    model_reply = _sanitize_output((generated.get("answer") or "").strip())
+    model_reply = sanitize_output((generated.get("answer") or "").strip())
     if not model_reply:
         model_reply = "Sorry, I received an empty response from the model."
 
-    cited_pages = _dedupe_pages(generated.get("cited_pages") or [])
+    cited_pages = dedupe_pages(generated.get("cited_pages") or [])
     # `cited_pages` is persisted on the row; `code_patch`/`action_type` stay
     # response-only (transient — the UI acts on them once, then they're gone).
     saved_msg = await add_chat_message(
@@ -969,7 +821,6 @@ async def send_chat_message(chat_id: str, request: ChatSendRequest):
         content=model_reply,
         cited_pages=cited_pages,
     )
-    saved_msg["cited_pages"] = cited_pages
     if generated.get("code_patch"):
         saved_msg["code_patch"] = generated["code_patch"]
     if generated.get("action_type"):
@@ -988,8 +839,7 @@ async def delete_chat_session(chat_id: str):
     success = await delete_chat(chat_id)
     if not success:
         raise HTTPException(status_code=404, detail="Chat not found")
-    # Drop its rate-limit window too.
-    _chat_hits.pop(chat_id, None)
+    chat_limiter.drop(chat_id)
     return {"success": True, "id": chat_id}
 
 
@@ -1001,77 +851,52 @@ def mask_key(k: str) -> str:
     return k[:4] + "••••••••" + k[-4:]
 
 
+def _parse_int(value: str | None, default: int) -> int:
+    try:
+        return int(value) if value is not None else default
+    except (TypeError, ValueError):
+        return default
+
+
+def _parse_bool(value: str | None, default: bool) -> bool:
+    return default if value is None else value.lower() in ("true", "1", "yes")
+
+
 @app.get("/api/settings", response_model=SettingsResponse)
 async def get_app_settings():
     db_settings = await get_all_settings()
-    env_key = os.environ.get("GEMINI_API_KEY", "").strip()
-    db_key = db_settings.get("gemini_api_key", "").strip()
-    effective_key = db_key or env_key
-
-    try:
-        temp = float(db_settings.get("ai_temperature", 0.7))
-    except (ValueError, TypeError):
-        temp = 0.7
-
-    try:
-        delay = int(db_settings.get("auto_compile_delay", 1500))
-    except (ValueError, TypeError):
-        delay = 1500
-
-    try:
-        font_size = int(db_settings.get("editor_font_size", 13))
-    except (ValueError, TypeError):
-        font_size = 13
-
-    word_wrap_raw = db_settings.get("editor_word_wrap")
-    word_wrap = True if word_wrap_raw is None else (word_wrap_raw.lower() in ("true", "1", "yes"))
-
-    line_nums_raw = db_settings.get("editor_line_numbers")
-    line_nums = True if line_nums_raw is None else (line_nums_raw.lower() in ("true", "1", "yes"))
+    ai_cfg = resolve_ai_config(db_settings)
 
     return SettingsResponse(
-        user_name=db_settings.get("user_name", "Researcher"),
-        user_affiliation=db_settings.get("user_affiliation", ""),
-        gemini_model=db_settings.get("gemini_model", settings.gemini_model or "gemini-3.5-flash-lite"),
-        gemini_api_key_set=bool(effective_key),
-        gemini_api_key_masked=mask_key(effective_key),
-        ai_temperature=temp,
-        ai_persona=db_settings.get("ai_persona", "academic"),
-        auto_compile_delay=delay,
-        editor_font_size=font_size,
-        editor_word_wrap=word_wrap,
-        editor_line_numbers=line_nums,
+        user_name=ai_cfg.user_name,
+        user_affiliation=ai_cfg.affiliation,
+        gemini_model=ai_cfg.model,
+        gemini_api_key_set=bool(ai_cfg.api_key),
+        gemini_api_key_masked=mask_key(ai_cfg.api_key),
+        ai_temperature=ai_cfg.temperature,
+        ai_persona=ai_cfg.persona,
+        auto_compile_delay=_parse_int(db_settings.get("auto_compile_delay"), DEFAULT_AUTO_COMPILE_DELAY),
+        editor_font_size=_parse_int(db_settings.get("editor_font_size"), DEFAULT_EDITOR_FONT_SIZE),
+        editor_word_wrap=_parse_bool(db_settings.get("editor_word_wrap"), DEFAULT_EDITOR_WORD_WRAP),
+        editor_line_numbers=_parse_bool(db_settings.get("editor_line_numbers"), DEFAULT_EDITOR_LINE_NUMBERS),
     )
 
 
 @app.put("/api/settings", response_model=SettingsResponse)
 async def update_app_settings(update: SettingsUpdate):
     to_save = {}
-    if update.user_name is not None:
-        to_save["user_name"] = update.user_name.strip()
-    if update.user_affiliation is not None:
-        to_save["user_affiliation"] = update.user_affiliation.strip()
-    if update.gemini_model is not None:
-        to_save["gemini_model"] = update.gemini_model.strip()
-    if update.gemini_api_key is not None:
-        cleaned_key = update.gemini_api_key.strip()
-        to_save["gemini_api_key"] = cleaned_key
-        if cleaned_key:
-            os.environ["GEMINI_API_KEY"] = cleaned_key
-            global _genai_client
-            _genai_client = None
-    if update.ai_temperature is not None:
-        to_save["ai_temperature"] = update.ai_temperature
-    if update.ai_persona is not None:
-        to_save["ai_persona"] = update.ai_persona
-    if update.auto_compile_delay is not None:
-        to_save["auto_compile_delay"] = update.auto_compile_delay
-    if update.editor_font_size is not None:
-        to_save["editor_font_size"] = update.editor_font_size
-    if update.editor_word_wrap is not None:
-        to_save["editor_word_wrap"] = str(update.editor_word_wrap).lower()
-    if update.editor_line_numbers is not None:
-        to_save["editor_line_numbers"] = str(update.editor_line_numbers).lower()
+    for field_name in ("user_name", "user_affiliation", "gemini_model", "gemini_api_key"):
+        val = getattr(update, field_name)
+        if val is not None:
+            to_save[field_name] = val.strip()
+    for field_name in ("ai_temperature", "ai_persona", "auto_compile_delay", "editor_font_size"):
+        val = getattr(update, field_name)
+        if val is not None:
+            to_save[field_name] = val
+    for field_name in ("editor_word_wrap", "editor_line_numbers"):
+        val = getattr(update, field_name)
+        if val is not None:
+            to_save[field_name] = str(val).lower()
 
     if to_save:
         await set_settings(to_save)
@@ -1079,18 +904,18 @@ async def update_app_settings(update: SettingsUpdate):
     return await get_app_settings()
 
 
-class TestKeyPayload(BaseModel):
-    api_key: Optional[str] = None
-
-
 @app.post("/api/settings/test-key")
 async def test_api_key(payload: Optional[TestKeyPayload] = None):
     try:
-        db_key = await get_setting("gemini_api_key")
-    except Exception:
-        db_key = ""
-    env_key = os.environ.get("GEMINI_API_KEY", "")
-    key = ((payload.api_key if payload else "") or db_key or env_key or "").strip()
+        db_settings = await get_all_settings()
+    except Exception as e:
+        logger.warning("Failed to read settings: %s", e)
+        db_settings = {}
+    ai_cfg = resolve_ai_config(
+        db_settings,
+        api_key_override=payload.api_key if payload else None,
+    )
+    key = ai_cfg.api_key
 
     if not key:
         return {"valid": False, "error": "No API key provided or configured"}
@@ -1119,7 +944,6 @@ async def test_api_key(payload: Optional[TestKeyPayload] = None):
 # Windows doesn't know .wasm, which breaks WebAssembly.instantiateStreaming.
 mimetypes.add_type("application/wasm", ".wasm")
 
-DIST_DIR = str(settings.dist_dir)
 if settings.dist_dir.is_dir():
     app.mount(
         "/assets",
@@ -1142,11 +966,7 @@ if settings.dist_dir.is_dir():
         ):
             raise HTTPException(status_code=404, detail="Not found")
         full = (settings.dist_dir / path).resolve()
-        try:
-            is_inside = full.is_relative_to(settings.dist_dir.resolve())
-        except AttributeError:  # Python < 3.9 fallback
-            is_inside = str(full).startswith(str(settings.dist_dir.resolve()))
-        if is_inside and full.is_file():
+        if full.is_relative_to(settings.dist_dir.resolve()) and full.is_file():
             return FileResponse(str(full))
         return FileResponse(str(settings.frontend_index))
 

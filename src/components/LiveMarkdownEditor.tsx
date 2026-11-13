@@ -1,4 +1,13 @@
 import React, { useEffect, useRef, useCallback, useState, useMemo } from 'react';
+import {
+  SLASH_MENU_BOUNDS,
+  SLASH_TRIGGER_RE,
+  SlashCommandMenu,
+  type SlashCommandItem as BaseSlashCommandItem,
+} from './SlashCommandMenu';
+import { countWords } from '../utils/document';
+import { computePopoverCoords } from '../utils/dom';
+import { emitEvent } from '../utils/events';
 
 interface LiveMarkdownEditorProps {
   content: string;
@@ -7,14 +16,8 @@ interface LiveMarkdownEditorProps {
   onWordCountChange?: (count: number) => void;
 }
 
-interface SlashCommandItem {
-  id: string;
-  label: string;
-  description: string;
-  badge: string;
-  category: string;
-  keywords: string[];
-  action: (line: HTMLElement, queryText: string) => void;
+interface MarkdownSlashCommand extends BaseSlashCommandItem {
+  action: (line: HTMLElement) => void;
 }
 
 function esc(s: string): string {
@@ -123,6 +126,23 @@ function commitLine(line: HTMLElement) {
   line.innerHTML = src.trim() ? renderBlock(src) : '';
 }
 
+function setCaretOffset(line: HTMLElement, start: number, end = start) {
+  const node = line.firstChild || line;
+  const len = (node.textContent || '').length;
+  const r = document.createRange();
+  try {
+    r.setStart(node, Math.min(start, len));
+    r.setEnd(node, Math.min(end, len));
+    const sel = window.getSelection();
+    if (sel) {
+      sel.removeAllRanges();
+      sel.addRange(r);
+    }
+  } catch {
+    // Ignore invalid offset on empty nodes
+  }
+}
+
 export const LiveMarkdownEditor: React.FC<LiveMarkdownEditorProps> = ({
   content,
   onChange,
@@ -130,8 +150,6 @@ export const LiveMarkdownEditor: React.FC<LiveMarkdownEditorProps> = ({
   onWordCountChange,
 }) => {
   const editorRef = useRef<HTMLDivElement>(null);
-  const menuListRef = useRef<HTMLDivElement>(null);
-  const isInternalChangeRef = useRef<boolean>(false);
   const debounceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const activeSlashLineRef = useRef<HTMLElement | null>(null);
   const lastWordCountRef = useRef<number>(-1);
@@ -167,7 +185,7 @@ export const LiveMarkdownEditor: React.FC<LiveMarkdownEditorProps> = ({
 
   const updateWordCount = useCallback(() => {
     const md = collectMD();
-    const words = (md.trim().match(/\S+/g) || []).length;
+    const words = countWords(md);
     // Typing inside a word doesn't change the count — skip the parent
     // setState entirely instead of relying on React's same-value bailout.
     if (words !== lastWordCountRef.current) {
@@ -177,11 +195,7 @@ export const LiveMarkdownEditor: React.FC<LiveMarkdownEditorProps> = ({
 
     if (debounceTimerRef.current) clearTimeout(debounceTimerRef.current);
     debounceTimerRef.current = setTimeout(() => {
-      isInternalChangeRef.current = true;
       onChange(md);
-      setTimeout(() => {
-        isInternalChangeRef.current = false;
-      }, 50);
     }, 250);
   }, [collectMD, onChange, onWordCountChange]);
 
@@ -205,7 +219,7 @@ export const LiveMarkdownEditor: React.FC<LiveMarkdownEditorProps> = ({
   const replaceTriggerAndApply = useCallback(
     (
       line: HTMLElement,
-      formatter: (cleanRemainingText: string) => { text: string; caretPos?: number } | string[]
+      formatter: (cleanRemainingText: string) => string | string[]
     ) => {
       ensureEditing(line);
       const text = line.textContent || '';
@@ -214,7 +228,7 @@ export const LiveMarkdownEditor: React.FC<LiveMarkdownEditorProps> = ({
       const beforeCaret = text.slice(0, offset);
       const afterCaret = text.slice(offset);
 
-      const match = beforeCaret.match(/(?:^|\s)\/([a-zA-Z0-9_-]*)$/);
+      const match = beforeCaret.match(SLASH_TRIGGER_RE);
       const triggerLen = match ? match[0].length : 1;
       const startIdx = match ? offset - triggerLen + (match[0].startsWith(' ') ? 1 : 0) : 0;
       const prefix = text.slice(0, startIdx);
@@ -224,8 +238,8 @@ export const LiveMarkdownEditor: React.FC<LiveMarkdownEditorProps> = ({
       if (Array.isArray(result)) {
         insertTemplateLines(line, result);
       } else {
-        line.textContent = result.text;
-        line.dataset.source = result.text;
+        line.textContent = result;
+        line.dataset.source = result;
         placeCaretEnd(line);
         updateWordCount();
       }
@@ -235,104 +249,85 @@ export const LiveMarkdownEditor: React.FC<LiveMarkdownEditorProps> = ({
   );
 
   // Slash commands registry (strictly zero emojis)
-  const commands: SlashCommandItem[] = useMemo(
+  const commands: MarkdownSlashCommand[] = useMemo(
     () => [
       {
         id: 'h1',
         label: 'Heading 1',
         description: 'Large section heading',
         badge: 'H1',
-        category: 'Headings',
         keywords: ['h1', 'heading', 'title', 'header', 'large'],
-        action: (line) =>
-          replaceTriggerAndApply(line, (rem) => ({ text: `# ${rem}` })),
+        action: (line) => replaceTriggerAndApply(line, (rem) => `# ${rem}`),
       },
       {
         id: 'h2',
         label: 'Heading 2',
         description: 'Medium section heading',
         badge: 'H2',
-        category: 'Headings',
         keywords: ['h2', 'heading', 'subtitle', 'header', 'medium'],
-        action: (line) =>
-          replaceTriggerAndApply(line, (rem) => ({ text: `## ${rem}` })),
+        action: (line) => replaceTriggerAndApply(line, (rem) => `## ${rem}`),
       },
       {
         id: 'h3',
         label: 'Heading 3',
         description: 'Small subsection heading',
         badge: 'H3',
-        category: 'Headings',
         keywords: ['h3', 'heading', 'sub', 'header', 'small'],
-        action: (line) =>
-          replaceTriggerAndApply(line, (rem) => ({ text: `### ${rem}` })),
+        action: (line) => replaceTriggerAndApply(line, (rem) => `### ${rem}`),
       },
       {
         id: 'todo',
         label: 'To-do List',
         description: 'Interactive checklist task',
         badge: '[ ]',
-        category: 'Lists & Tasks',
         keywords: ['todo', 'task', 'check', 'checkbox', 'list'],
-        action: (line) =>
-          replaceTriggerAndApply(line, (rem) => ({ text: `- [ ] ${rem}` })),
+        action: (line) => replaceTriggerAndApply(line, (rem) => `- [ ] ${rem}`),
       },
       {
         id: 'bullet',
         label: 'Bullet List',
         description: 'Simple unnumbered list item',
         badge: '•',
-        category: 'Lists & Tasks',
         keywords: ['bullet', 'list', 'unordered', 'item', 'point'],
-        action: (line) =>
-          replaceTriggerAndApply(line, (rem) => ({ text: `- ${rem}` })),
+        action: (line) => replaceTriggerAndApply(line, (rem) => `- ${rem}`),
       },
       {
         id: 'numbered',
         label: 'Numbered List',
         description: 'Ordered sequential list item',
         badge: '1.',
-        category: 'Lists & Tasks',
         keywords: ['numbered', 'number', 'ordered', 'list', 'sequence'],
-        action: (line) =>
-          replaceTriggerAndApply(line, (rem) => ({ text: `1. ${rem}` })),
+        action: (line) => replaceTriggerAndApply(line, (rem) => `1. ${rem}`),
       },
       {
         id: 'quote',
         label: 'Blockquote',
         description: 'Callout or quotation block',
         badge: '"',
-        category: 'Quotes & Code',
         keywords: ['quote', 'blockquote', 'callout', 'cite'],
-        action: (line) =>
-          replaceTriggerAndApply(line, (rem) => ({ text: `> ${rem}` })),
+        action: (line) => replaceTriggerAndApply(line, (rem) => `> ${rem}`),
       },
       {
         id: 'code',
         label: 'Code Snippet',
         description: 'Inline code or formatted snippet',
         badge: '<>',
-        category: 'Quotes & Code',
         keywords: ['code', 'snippet', 'syntax', 'programming'],
-        action: (line) =>
-          replaceTriggerAndApply(line, (rem) => ({ text: `\`${rem || 'code'}\`` })),
+        action: (line) => replaceTriggerAndApply(line, (rem) => `\`${rem || 'code'}\``),
       },
       {
         id: 'divider',
         label: 'Divider',
         description: 'Horizontal divider line',
         badge: '---',
-        category: 'Structure',
         keywords: ['divider', 'line', 'separator', 'hr', 'rule'],
-        action: (line) =>
-          replaceTriggerAndApply(line, () => ({ text: '---' })),
+        action: (line) => replaceTriggerAndApply(line, () => '---'),
       },
       {
         id: 'date',
-        label: 'Today\'s Date',
+        label: "Today's Date",
         description: 'Insert current formatted date',
         badge: 'CAL',
-        category: 'Inserts',
         keywords: ['date', 'today', 'time', 'timestamp'],
         action: (line) => {
           const now = new Date().toLocaleDateString('en-US', {
@@ -340,9 +335,7 @@ export const LiveMarkdownEditor: React.FC<LiveMarkdownEditorProps> = ({
             day: 'numeric',
             year: 'numeric',
           });
-          replaceTriggerAndApply(line, (rem) => ({
-            text: `${now} ${rem}`.trim(),
-          }));
+          replaceTriggerAndApply(line, (rem) => `${now} ${rem}`.trim());
         },
       },
       {
@@ -350,31 +343,22 @@ export const LiveMarkdownEditor: React.FC<LiveMarkdownEditorProps> = ({
         label: 'Wiki Link',
         description: 'Internal concept or paper link',
         badge: '[[ ]]',
-        category: 'Inserts',
         keywords: ['wiki', 'link', 'concept', 'paper', 'page'],
-        action: (line) =>
-          replaceTriggerAndApply(line, (rem) => ({
-            text: `[[${rem || 'Concept'}]]`,
-          })),
+        action: (line) => replaceTriggerAndApply(line, (rem) => `[[${rem || 'Concept'}]]`),
       },
       {
         id: 'tag',
         label: 'Tag',
         description: 'Category or topic hashtag',
         badge: '#',
-        category: 'Inserts',
         keywords: ['tag', 'hashtag', 'label', 'topic'],
-        action: (line) =>
-          replaceTriggerAndApply(line, (rem) => ({
-            text: `#${rem || 'topic'}`,
-          })),
+        action: (line) => replaceTriggerAndApply(line, (rem) => `#${rem || 'topic'}`),
       },
       {
         id: 'summary-template',
         label: 'Research Summary',
         description: 'Structured objective & findings template',
         badge: 'DOC',
-        category: 'Templates',
         keywords: ['summary', 'template', 'findings', 'research', 'paper'],
         action: (line) =>
           replaceTriggerAndApply(line, () => [
@@ -390,7 +374,6 @@ export const LiveMarkdownEditor: React.FC<LiveMarkdownEditorProps> = ({
         label: 'Key Takeaways',
         description: 'Actionable checklist of insights',
         badge: 'LIST',
-        category: 'Templates',
         keywords: ['takeaways', 'insights', 'action', 'template', 'key'],
         action: (line) =>
           replaceTriggerAndApply(line, () => [
@@ -405,7 +388,6 @@ export const LiveMarkdownEditor: React.FC<LiveMarkdownEditorProps> = ({
         label: 'Key Quotation',
         description: 'Paper excerpt with citation',
         badge: '"',
-        category: 'Templates',
         keywords: ['quote', 'quotation', 'citation', 'excerpt', 'reference'],
         action: (line) =>
           replaceTriggerAndApply(line, () => [
@@ -432,16 +414,6 @@ export const LiveMarkdownEditor: React.FC<LiveMarkdownEditorProps> = ({
   const filteredCommandsRef = useRef(filteredCommands);
   filteredCommandsRef.current = filteredCommands;
 
-  // Auto-scroll active item into view
-  useEffect(() => {
-    if (slashMenu.open && menuListRef.current) {
-      const activeEl = menuListRef.current.querySelector('.slash-item.active') as HTMLElement | null;
-      if (activeEl) {
-        activeEl.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
-      }
-    }
-  }, [slashMenu.selectedIndex, slashMenu.open]);
-
   // Load Initial Lines
   const loadLines = useCallback(
     (md: string) => {
@@ -451,7 +423,7 @@ export const LiveMarkdownEditor: React.FC<LiveMarkdownEditorProps> = ({
       const lines = (md || '').split('\n');
       lines.forEach((s) => editor.appendChild(makeLine(s, true)));
       if (!editor.children.length) editor.appendChild(makeLine('', false));
-      const words = (md.trim().match(/\S+/g) || []).length;
+      const words = countWords(md);
       lastWordCountRef.current = words;
       onWordCountChange?.(words);
     },
@@ -459,10 +431,12 @@ export const LiveMarkdownEditor: React.FC<LiveMarkdownEditorProps> = ({
   );
 
   useEffect(() => {
-    if (!isInternalChangeRef.current) {
-      loadLines(content);
+    const editor = editorRef.current;
+    if (editor && editor.children.length > 0 && collectMD() === content) {
+      return;
     }
-  }, [content, loadLines]);
+    loadLines(content);
+  }, [content, collectMD, loadLines]);
 
   // Debounced onChange timer must not fire after unmount (stale write to
   // a switched-away document's note).
@@ -473,10 +447,10 @@ export const LiveMarkdownEditor: React.FC<LiveMarkdownEditorProps> = ({
   }, []);
 
   // Handle Slash Menu execution
-  const executeCommand = useCallback((cmd: SlashCommandItem) => {
+  const executeCommand = useCallback((cmd: MarkdownSlashCommand) => {
     const line = activeSlashLineRef.current;
     if (!line) return;
-    cmd.action(line, slashMenuRef.current.query);
+    cmd.action(line);
   }, []);
 
   // Editor Event Listeners
@@ -506,6 +480,18 @@ export const LiveMarkdownEditor: React.FC<LiveMarkdownEditorProps> = ({
                c.classList.remove('selected-block');
            }
        });
+    };
+
+    const collapseBlockSelection = (selectedBlocks: HTMLElement[], initialText: string) => {
+      selectedBlocks.slice(1).forEach((b) => b.remove());
+      const first = selectedBlocks[0];
+      first.textContent = initialText;
+      first.dataset.source = initialText;
+      ensureEditing(first);
+      placeCaretEnd(first);
+      first.classList.remove('selected-block');
+      hasBlockSelection = false;
+      updateWordCount();
     };
 
     const handleFocusIn = (e: FocusEvent) => {
@@ -567,27 +553,25 @@ export const LiveMarkdownEditor: React.FC<LiveMarkdownEditorProps> = ({
         const text = line.textContent || '';
         const offset = sel.anchorOffset;
         const beforeCaret = text.slice(0, offset);
-        const slashMatch = beforeCaret.match(/(?:^|\s)\/([a-zA-Z0-9_-]*)$/);
+        const slashMatch = beforeCaret.match(SLASH_TRIGGER_RE);
 
         if (slashMatch) {
           const query = slashMatch[1].toLowerCase();
           const range = sel.getRangeAt(0);
           const rect = range.getBoundingClientRect();
           activeSlashLineRef.current = line;
-
-          const menuWidth = 300;
-          const menuHeight = 320;
-          const posX = Math.max(16, Math.min(rect.left, window.innerWidth - menuWidth - 20));
-          const posY =
-            rect.bottom + menuHeight > window.innerHeight
-              ? Math.max(16, rect.top - menuHeight - 6)
-              : rect.bottom + 6;
+          const { left, top } = computePopoverCoords(
+            rect,
+            SLASH_MENU_BOUNDS.width,
+            SLASH_MENU_BOUNDS.height,
+            SLASH_MENU_BOUNDS.margin,
+          );
 
           setSlashMenu({
             open: true,
             query,
-            x: posX,
-            y: posY,
+            x: left,
+            y: top,
             selectedIndex: 0,
           });
           return;
@@ -602,10 +586,7 @@ export const LiveMarkdownEditor: React.FC<LiveMarkdownEditorProps> = ({
       if (pageRef) {
         e.preventDefault();
         e.stopPropagation();
-        const pageNum = parseInt(pageRef.dataset.page || '1', 10);
-        window.dispatchEvent(
-          new CustomEvent('rsrch:scroll-to-page', { detail: { page: pageNum } })
-        );
+        emitEvent('scroll-to-page', { page: parseInt(pageRef.dataset.page || '1', 10) });
         return;
       }
 
@@ -660,28 +641,12 @@ export const LiveMarkdownEditor: React.FC<LiveMarkdownEditorProps> = ({
           if (selectedBlocks.length > 0) {
               if (e.key === 'Backspace' || e.key === 'Delete') {
                   e.preventDefault();
-                  selectedBlocks.slice(1).forEach(b => b.remove());
-                  const first = selectedBlocks[0];
-                  first.textContent = '';
-                  first.dataset.source = '';
-                  ensureEditing(first);
-                  placeCaretEnd(first);
-                  first.classList.remove('selected-block');
-                  hasBlockSelection = false;
-                  updateWordCount();
+                  collapseBlockSelection(selectedBlocks, '');
                   return;
               }
               if (e.key.length === 1 && !mod) {
                   e.preventDefault();
-                  selectedBlocks.slice(1).forEach(b => b.remove());
-                  const first = selectedBlocks[0];
-                  first.textContent = e.key;
-                  first.dataset.source = e.key;
-                  ensureEditing(first);
-                  placeCaretEnd(first);
-                  first.classList.remove('selected-block');
-                  hasBlockSelection = false;
-                  updateWordCount();
+                  collapseBlockSelection(selectedBlocks, e.key);
                   return;
               }
           }
@@ -699,12 +664,8 @@ export const LiveMarkdownEditor: React.FC<LiveMarkdownEditorProps> = ({
         }
         const md = collectMD();
         if (debounceTimerRef.current) clearTimeout(debounceTimerRef.current);
-        isInternalChangeRef.current = true;
         onChange(md);
         onManualSave?.(md);
-        setTimeout(() => {
-          isInternalChangeRef.current = false;
-        }, 50);
         return;
       }
 
@@ -757,18 +718,7 @@ export const LiveMarkdownEditor: React.FC<LiveMarkdownEditorProps> = ({
         line.textContent = txt;
         line.dataset.source = txt;
         if (selStart !== null) {
-          const node = line.firstChild || line;
-          const len = (node.textContent || '').length;
-          const r = document.createRange();
-          try {
-            r.setStart(node, Math.min(selStart, len));
-            r.setEnd(node, Math.min(selEnd ?? selStart, len));
-            const s = window.getSelection();
-            if (s) {
-              s.removeAllRanges();
-              s.addRange(r);
-            }
-          } catch {}
+          setCaretOffset(line, selStart, selEnd ?? selStart);
         }
         updateWordCount();
       };
@@ -983,38 +933,27 @@ export const LiveMarkdownEditor: React.FC<LiveMarkdownEditorProps> = ({
         line.after(nl);
         placeCaretEnd(nl);
         updateWordCount();
-      } else if (e.key === 'Backspace' || e.key === 'Delete') {
-        if (e.key === 'Backspace') {
-            const { start, end, text: currentText } = selRange();
-            if (start === 0 && end === 0) {
-                e.preventDefault();
-                const prev = line.previousElementSibling as HTMLElement | null;
-                if (prev?.classList.contains('live-line')) {
-                    ensureEditing(prev);
-                    const prevText = prev.dataset.source || '';
-                    prev.textContent = prevText + currentText;
-                    prev.dataset.source = prev.textContent;
-                    line.remove();
-                    
-                    const node = prev.firstChild || prev;
-                    const r = document.createRange();
-                    try {
-                        r.setStart(node, prevText.length);
-                        r.setEnd(node, prevText.length);
-                        const sel = window.getSelection();
-                        sel?.removeAllRanges();
-                        sel?.addRange(r);
-                    } catch {}
-                    updateWordCount();
-                } else if (currentText === '') {
-                    line.remove();
-                    if (!liveEd.children.length) {
-                        liveEd.appendChild(makeLine('', false));
-                    }
-                    updateWordCount();
-                }
-                return;
+      } else if (e.key === 'Backspace') {
+        const { start, end, text: currentText } = selRange();
+        if (start === 0 && end === 0) {
+          e.preventDefault();
+          const prev = line.previousElementSibling as HTMLElement | null;
+          if (prev?.classList.contains('live-line')) {
+            ensureEditing(prev);
+            const prevText = prev.dataset.source || '';
+            prev.textContent = prevText + currentText;
+            prev.dataset.source = prev.textContent;
+            line.remove();
+            setCaretOffset(prev, prevText.length);
+            updateWordCount();
+          } else if (currentText === '') {
+            line.remove();
+            if (!liveEd.children.length) {
+              liveEd.appendChild(makeLine('', false));
             }
+            updateWordCount();
+          }
+          return;
         }
       }
     };
@@ -1078,15 +1017,7 @@ export const LiveMarkdownEditor: React.FC<LiveMarkdownEditorProps> = ({
       if (lines.length === 1) {
          startLine.textContent = before + lines[0] + after;
          startLine.dataset.source = startLine.textContent;
-         
-         const r = document.createRange();
-         const node = startLine.firstChild || startLine;
-         try {
-             r.setStart(node, start + lines[0].length);
-             r.setEnd(node, start + lines[0].length);
-             newSel?.removeAllRanges();
-             newSel?.addRange(r);
-         } catch {}
+         setCaretOffset(startLine, start + lines[0].length);
       } else {
          const newLines = [...lines];
          newLines[0] = before + newLines[0];
@@ -1105,15 +1036,7 @@ export const LiveMarkdownEditor: React.FC<LiveMarkdownEditorProps> = ({
              e.clipboardData?.setData('text/plain', text);
              
              if (e.type === 'cut') {
-                 selectedBlocks.slice(1).forEach(b => b.remove());
-                 const first = selectedBlocks[0];
-                 first.textContent = '';
-                 first.dataset.source = '';
-                 ensureEditing(first);
-                 placeCaretEnd(first);
-                 first.classList.remove('selected-block');
-                 hasBlockSelection = false;
-                 updateWordCount();
+                 collapseBlockSelection(selectedBlocks, '');
              }
           }
       }
@@ -1151,42 +1074,16 @@ export const LiveMarkdownEditor: React.FC<LiveMarkdownEditorProps> = ({
       <div id="liveEditor" className="live-editor" ref={editorRef} />
 
       {/* Floating Slash Commands Menu (Zero Emojis) */}
-      {slashMenu.open && (
-        <div
-          className="slash-menu"
-          style={{ top: `${slashMenu.y}px`, left: `${slashMenu.x}px` }}
-          onMouseDown={(e) => e.preventDefault()}
-        >
-          <div className="slash-menu-head">
-            <span>Blocks & Tools</span>
-            <kbd>ESC to close</kbd>
-          </div>
-          <div className="slash-menu-list" ref={menuListRef}>
-            {filteredCommands.length === 0 ? (
-              <div className="slash-menu-empty">No matching commands</div>
-            ) : (
-              filteredCommands.map((cmd, idx) => {
-                const isSelected = idx === slashMenu.selectedIndex;
-                return (
-                  <button
-                    key={cmd.id}
-                    className={`slash-item ${isSelected ? 'active' : ''}`}
-                    onClick={() => executeCommand(cmd)}
-                    type="button"
-                  >
-                    <span className="slash-item-badge">{cmd.badge}</span>
-                    <div className="slash-item-info">
-                      <div className="slash-item-title">{cmd.label}</div>
-                      <div className="slash-item-desc">{cmd.description}</div>
-                    </div>
-                    {isSelected && <span className="slash-item-hint">↵</span>}
-                  </button>
-                );
-              })
-            )}
-          </div>
-        </div>
-      )}
+      <SlashCommandMenu
+        open={slashMenu.open}
+        x={slashMenu.x}
+        y={slashMenu.y}
+        selectedIndex={slashMenu.selectedIndex}
+        items={filteredCommands}
+        onSelect={executeCommand}
+        onHoverIndex={(idx) => setSlashMenu((prev) => ({ ...prev, selectedIndex: idx }))}
+        onClose={() => setSlashMenu((prev) => ({ ...prev, open: false }))}
+      />
     </div>
   );
 };

@@ -1,6 +1,5 @@
 import type { DocumentItem } from '../types';
-
-const baseName = (n?: string) => (n || '').replace(/\.pdf$/i, '');
+import { cleanDocName } from './document';
 
 /**
  * Single shared document-matches-query predicate. Sidebar and
@@ -13,9 +12,21 @@ export function docMatchesQuery(
   query: string,
   loweredNote?: string,
 ): boolean {
-  if (baseName(doc.name).toLowerCase().includes(query)) return true;
+  if (cleanDocName(doc.name).toLowerCase().includes(query)) return true;
   if ((doc.note_title || '').toLowerCase().includes(query)) return true;
   if ((doc.tag || '').toLowerCase().includes(query)) return true;
   if (loweredNote && loweredNote.includes(query)) return true;
   return false;
+}
+
+export function buildLoweredNotes(
+  notesCache?: Record<string, string>,
+): Record<string, string> {
+  if (!notesCache) return {};
+  const map: Record<string, string> = {};
+  for (const k of Object.keys(notesCache)) {
+    const v = notesCache[k];
+    map[k] = typeof v === 'string' ? v.toLowerCase() : '';
+  }
+  return map;
 }

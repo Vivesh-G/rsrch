@@ -39,7 +39,6 @@ def parse_diagnostics(stderr: str, log_content: str) -> list[Diagnostic]:
     while i < len(lines):
         line = lines[i]
         
-        # TeX errors start with "! "
         if line.startswith("! "):
             msg = line[2:].strip()
             if msg.startswith("LaTeX Error:"):
@@ -57,7 +56,8 @@ def parse_diagnostics(stderr: str, log_content: str) -> list[Diagnostic]:
                 message=msg,
                 line=line_no
             ))
-            i = j
+            if line_no is not None:
+                i = j
             
         elif line.startswith("LaTeX Warning:") or (line.startswith("Package") and "Warning:" in line):
             msg = line

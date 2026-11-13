@@ -1,5 +1,5 @@
 import React from 'react';
-import { IconClose } from './Icons';
+import { Modal } from './Modal';
 
 interface KeyboardShortcutsModalProps {
   isOpen: boolean;
@@ -54,41 +54,23 @@ export const KeyboardShortcutsModal: React.FC<KeyboardShortcutsModalProps> = ({
   isOpen,
   onClose,
 }) => {
-  if (!isOpen) return null;
-
   return (
-    <div className="modal-backdrop" onClick={onClose}>
-      <div className="modal-card" onClick={(e) => e.stopPropagation()}>
-        <div className="modal-head">
-          <div className="modal-title">Keyboard Shortcuts</div>
-          <button
-            className="icon-btn small modal-close"
-            onClick={onClose}
-            title="Close"
-            type="button"
-          >
-            <IconClose size={12} />
-          </button>
-        </div>
-
-        <div className="modal-body">
-          <div className="shortcuts-grid">
-            {SHORTCUT_DATA.map((cat) => (
-              <div key={cat.title} className="shortcut-category">
-                <div className="shortcut-category-title">{cat.title}</div>
-                <div className="shortcut-list">
-                  {cat.items.map((item) => (
-                    <div key={item.key} className="shortcut-row">
-                      <span className="shortcut-desc">{item.description}</span>
-                      <kbd className="shortcut-kbd">{item.key}</kbd>
-                    </div>
-                  ))}
+    <Modal open={isOpen} onClose={onClose} title="Keyboard Shortcuts">
+      <div className="shortcuts-grid">
+        {SHORTCUT_DATA.map((cat) => (
+          <div key={cat.title} className="shortcut-category">
+            <div className="shortcut-category-title">{cat.title}</div>
+            <div className="shortcut-list">
+              {cat.items.map((item) => (
+                <div key={item.key} className="shortcut-row">
+                  <span className="shortcut-desc">{item.description}</span>
+                  <kbd className="shortcut-kbd">{item.key}</kbd>
                 </div>
-              </div>
-            ))}
+              ))}
+            </div>
           </div>
-        </div>
+        ))}
       </div>
-    </div>
+    </Modal>
   );
 };

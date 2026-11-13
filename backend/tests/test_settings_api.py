@@ -1,7 +1,11 @@
-"""Settings API endpoint tests."""
+"""Settings API endpoint tests (isolated from host .env and DB)."""
+
+import dataclasses
 
 import pytest
 from httpx import ASGITransport, AsyncClient
+
+import ai.config as ai_config
 import database
 import server
 
@@ -9,6 +13,15 @@ import server
 @pytest.fixture
 async def async_client(tmp_path, monkeypatch):
     monkeypatch.setattr(database, "DB_PATH", str(tmp_path / "test_settings.db"))
+    monkeypatch.setattr(
+        ai_config,
+        "app_settings",
+        dataclasses.replace(
+            ai_config.app_settings,
+            gemini_api_key="",
+            gemini_model="gemini-3.5-flash-lite",
+        ),
+    )
     await database.init_db()
     transport = ASGITransport(app=server.app)
     async with AsyncClient(transport=transport, base_url="http://test") as ac:
@@ -20,8 +33,9 @@ async def test_get_settings_defaults(async_client):
     assert res.status_code == 200
     data = res.json()
     assert data["user_name"] == "Researcher"
-    assert "gemini_model" in data
-    assert "gemini_api_key_set" in data
+    assert data["gemini_model"] == "gemini-3.5-flash-lite"
+    assert data["gemini_api_key_set"] is False
+    assert data["gemini_api_key_masked"] == ""
 
 
 async def test_update_settings_and_readback(async_client):
@@ -34,6 +48,8 @@ async def test_update_settings_and_readback(async_client):
         "ai_persona": "pedagogical",
         "auto_compile_delay": 3000,
         "editor_font_size": 15,
+        "editor_word_wrap": False,
+        "editor_line_numbers": False,
     }
     res = await async_client.put("/api/settings", json=update_payload)
     assert res.status_code == 200
@@ -48,43 +64,19 @@ async def test_update_settings_and_readback(async_client):
     assert data["ai_persona"] == "pedagogical"
     assert data["auto_compile_delay"] == 3000
     assert data["editor_font_size"] == 15
+    assert data["editor_word_wrap"] is False
+    assert data["editor_line_numbers"] is False
 
     # Verify GET returns the same persisted state
     get_res = await async_client.get("/api/settings")
     assert get_res.status_code == 200
     get_data = get_res.json()
-    assert get_data["user_name"] == "Dr. Katherine Johnson"
-    assert get_data["gemini_api_key_set"] is True
+    assert get_data == data
 
 
-async def test_test_key_endpoint_validation(async_client):
+async def test_test_key_endpoint_validation_empty_key(async_client):
     res = await async_client.post("/api/settings/test-key", json={"api_key": ""})
     assert res.status_code == 200
     data = res.json()
     assert data["valid"] is False
-
-
-async def test_lazy_table_creation_without_init_db(tmp_path, monkeypatch):
-    """Ensure that get and put settings work cleanly on a fresh database."""
-    fresh_db = str(tmp_path / "fresh_no_init.db")
-    monkeypatch.setattr(database, "DB_PATH", fresh_db)
-    await database.init_db()
-    transport = ASGITransport(app=server.app)
-    async with AsyncClient(transport=transport, base_url="http://test") as ac:
-        res = await ac.get("/api/settings")
-        assert res.status_code == 200
-        assert res.json()["user_name"] == "Researcher"
-
-        put_res = await ac.put(
-            "/api/settings",
-            json={
-                "gemini_api_key": "test_saved_key_12345",
-                "editor_word_wrap": False,
-                "editor_line_numbers": False,
-            },
-        )
-        assert put_res.status_code == 200
-        put_data = put_res.json()
-        assert put_data["gemini_api_key_set"] is True
-        assert put_data["editor_word_wrap"] is False
-        assert put_data["editor_line_numbers"] is False
+    assert data["error"] == "No API key provided or configured"

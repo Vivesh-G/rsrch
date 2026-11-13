@@ -26,18 +26,27 @@ export interface NoteData {
   updated_at: number;
 }
 
-export interface SearchResult {
-  document_id: string;
-  workspace_id: string;
-  workspace_name: string;
-  document_name: string;
-  note_title: string;
-  tag: string;
-  snippet?: string;
-  match_type: 'name' | 'title' | 'tag' | 'note';
+export interface CompileDiagnostic {
+  severity: 'error' | 'warning' | string;
+  message: string;
+  file?: string | null;
+  line?: number | null;
+  column?: number | null;
+  source?: string;
 }
 
-export type CategoryTag = 'NLP' | 'Architecture' | 'Foundations' | 'Strategy' | 'ML' | 'General' | string;
+export interface CompileResult {
+  build_id: string;
+  cached: boolean;
+  status: 'success' | 'error' | 'timeout' | string;
+  duration_ms: number;
+  diagnostics: CompileDiagnostic[];
+}
+
+export interface WorkspaceAsset {
+  path: string;
+  filename?: string;
+}
 
 export interface ChatMessage {
   id?: number | string;
@@ -48,9 +57,6 @@ export interface ChatMessage {
   created_at: number;
   /** Persisted with the message — survives chat-history reload. */
   cited_pages?: number[];
-  /** Response-only: transient LaTeX payload the UI acts on once. */
-  code_patch?: string;
-  action_type?: string;
 }
 
 export interface ChatSession {

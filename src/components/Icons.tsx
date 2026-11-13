@@ -341,25 +341,6 @@ export const IconCheck: React.FC<IconProps> = ({ size = 14, className = '', styl
   </svg>
 );
 
-export const IconLink: React.FC<IconProps> = ({ size = 14, className = '', style, ...rest }) => (
-  <svg
-    width={size}
-    height={size}
-    viewBox="0 0 24 24"
-    fill="none"
-    stroke="currentColor"
-    strokeWidth="2"
-    strokeLinecap="round"
-    strokeLinejoin="round"
-    className={`icon-svg ${className}`}
-    style={style}
-    {...rest}
-  >
-    <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" />
-    <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" />
-  </svg>
-);
-
 export const IconExternalLink: React.FC<IconProps> = ({ size = 14, className = '', style, ...rest }) => (
   <svg
     width={size}
@@ -502,20 +483,6 @@ export const IconEye: React.FC<IconProps> = ({ size = 15, className = '', style,
   </svg>
 );
 
-export const IconQuote: React.FC<IconProps> = ({ size = 14, className = '', style, ...rest }) => (
-  <svg
-    width={size}
-    height={size}
-    viewBox="0 0 24 24"
-    fill="currentColor"
-    className={`icon-svg ${className}`}
-    style={style}
-    {...rest}
-  >
-    <path d="M4.583 17.321C3.553 16.227 3 15 3 13.011c0-3.5 2.457-6.637 6.03-8.188l.893 1.378c-3.335 1.804-3.987 4.145-4.247 5.621.537-.278 1.24-.375 1.929-.311 1.804.167 3.226 1.648 3.226 3.489a3.5 3.5 0 0 1-3.5 3.5c-1.073 0-2.099-.49-2.748-1.179zm10 0C13.553 16.227 13 15 13 13.011c0-3.5 2.457-6.637 6.03-8.188l.893 1.378c-3.335 1.804-3.987 4.145-4.247 5.621.537-.278 1.24-.375 1.929-.311 1.804.167 3.226 1.648 3.226 3.489a3.5 3.5 0 0 1-3.5 3.5c-1.073 0-2.099-.49-2.748-1.179z" />
-  </svg>
-);
-
 export const IconHighlighter: React.FC<IconProps> = ({ size = 14, className = '', style, ...rest }) => (
   <svg
     width={size}
@@ -605,44 +572,6 @@ export const IconChevronRight: React.FC<IconProps> = ({ size = 15, className = '
     {...rest}
   >
     <polyline points="9 18 15 12 9 6" />
-  </svg>
-);
-
-export const IconChevronsLeft: React.FC<IconProps> = ({ size = 15, className = '', style, ...rest }) => (
-  <svg
-    width={size}
-    height={size}
-    viewBox="0 0 24 24"
-    fill="none"
-    stroke="currentColor"
-    strokeWidth="2"
-    strokeLinecap="round"
-    strokeLinejoin="round"
-    className={`icon-svg ${className}`}
-    style={style}
-    {...rest}
-  >
-    <polyline points="11 17 6 12 11 7" />
-    <polyline points="18 17 13 12 18 7" />
-  </svg>
-);
-
-export const IconChevronsRight: React.FC<IconProps> = ({ size = 15, className = '', style, ...rest }) => (
-  <svg
-    width={size}
-    height={size}
-    viewBox="0 0 24 24"
-    fill="none"
-    stroke="currentColor"
-    strokeWidth="2"
-    strokeLinecap="round"
-    strokeLinejoin="round"
-    className={`icon-svg ${className}`}
-    style={style}
-    {...rest}
-  >
-    <polyline points="13 17 18 12 13 7" />
-    <polyline points="6 17 11 12 6 7" />
   </svg>
 );
 

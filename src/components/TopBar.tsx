@@ -11,6 +11,7 @@ import {
   IconLogo,
 } from './Icons';
 import { KeyboardShortcutsModal } from './KeyboardShortcutsModal';
+import { STORAGE_KEYS, readRawStored, writeRawStored } from '../utils/storage';
 
 interface TopBarProps {
   searchQuery: string;
@@ -37,11 +38,9 @@ const TopBarInner: React.FC<TopBarProps> = ({
 }) => {
   const [isDark, setIsDark] = useState<boolean>(() => {
     // Same source of truth as the pre-paint script in index.html.
-    try {
-      const stored = localStorage.getItem('rschr-theme');
-      if (stored) return stored === 'dark';
-      if (window.matchMedia('(prefers-color-scheme: light)').matches) return false;
-    } catch {}
+    const stored = readRawStored(STORAGE_KEYS.theme);
+    if (stored) return stored === 'dark';
+    if (window.matchMedia('(prefers-color-scheme: light)').matches) return false;
     return document.body.classList.contains('dark');
   });
   const [isFullscreen, setIsFullscreen] = useState<boolean>(false);
@@ -100,9 +99,7 @@ const TopBarInner: React.FC<TopBarProps> = ({
   const toggleTheme = () => {
     const nextDark = !isDark;
     setIsDark(nextDark);
-    try {
-      localStorage.setItem('rschr-theme', nextDark ? 'dark' : 'light');
-    } catch {}
+    writeRawStored(STORAGE_KEYS.theme, nextDark ? 'dark' : 'light');
   };
 
   const toggleFocus = () => {

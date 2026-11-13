@@ -89,13 +89,12 @@ async def test_chat_history_returns_tail_chronological(test_db):
 
 async def test_app_settings_roundtrip(test_db):
     db = test_db
-    assert await db.get_setting("user_name") is None
+    assert (await db.get_all_settings()).get("user_name") is None
     await db.set_settings({"user_name": "Test User", "gemini_model": "gemini-2.5-flash"})
-    assert await db.get_setting("user_name") == "Test User"
-    assert await db.get_setting("gemini_model") == "gemini-2.5-flash"
     all_s = await db.get_all_settings()
     assert all_s["user_name"] == "Test User"
+    assert all_s["gemini_model"] == "gemini-2.5-flash"
     # Update existing key
     await db.set_settings({"user_name": "Updated User"})
-    assert await db.get_setting("user_name") == "Updated User"
+    assert (await db.get_all_settings())["user_name"] == "Updated User"
 

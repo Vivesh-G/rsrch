@@ -34,3 +34,7 @@ dist-ssr
 *.db 
 
 backend/__pycache__/
+
+.agents/
+
+skills-lock.json

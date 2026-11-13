@@ -1,24 +1,15 @@
-"""Server util tests: PDF magic bytes, rate limiter, PDF extraction."""
+"""Server util, rate-limiter, and PDF chunker tests."""
 
 import uuid
 
+from httpx import ASGITransport, AsyncClient
+import pymupdf
 import pytest
-from fastapi import HTTPException
 
+import chunker
+import database
 import server
-from config import settings
-
-
-def _chat_id():
-    return f"chat_test_{uuid.uuid4().hex[:8]}"
-
-
-@pytest.fixture
-def isolated_chats():
-    seen = []
-    yield seen.append
-    for chat_id in seen:
-        server._chat_hits.pop(chat_id, None)
+from rate_limiter import ChatRateLimiter, RateLimitExceeded
 
 
 @pytest.mark.parametrize(
@@ -35,68 +26,77 @@ def test_is_pdf_bytes(data, expected):
     assert server._is_pdf_bytes(data) is expected
 
 
-def test_allows_up_to_limit_then_429(isolated_chats):
-    chat_id = _chat_id()
-    isolated_chats(chat_id)
-    for _ in range(settings.chat_rate_limit):
-        server.check_chat_rate_limit(chat_id)
-    with pytest.raises(HTTPException) as exc_info:
-        server.check_chat_rate_limit(chat_id)
-    assert exc_info.value.status_code == 429
+def test_rate_limiter_enforces_limit_per_key_and_drop():
+    limiter = ChatRateLimiter(limit=3, window_s=60.0)
+    for _ in range(3):
+        limiter.check("chat_a")
+    with pytest.raises(RateLimitExceeded):
+        limiter.check("chat_a")
+
+    # Separate key is unaffected
+    limiter.check("chat_b")
+
+    # Dropping a key clears its window
+    limiter.drop("chat_a")
+    limiter.check("chat_a")
 
 
-def test_rate_limit_is_per_key(isolated_chats):
-    chat_a, chat_b = _chat_id(), _chat_id()
-    isolated_chats(chat_a)
-    isolated_chats(chat_b)
-    for _ in range(settings.chat_rate_limit):
-        server.check_chat_rate_limit(chat_a)
-    # Other chat unaffected by A's exhaustion.
-    server.check_chat_rate_limit(chat_b)
+async def test_rate_limit_exception_maps_to_429(tmp_path, monkeypatch):
+    monkeypatch.setattr(database, "DB_PATH", str(tmp_path / "rl.db"))
+    await database.init_db()
+    ws = f"ws_{uuid.uuid4().hex[:8]}"
+    await database.create_workspace(ws, "W")
+    chat = await database.create_chat(title="t", document_id=None)
+
+    monkeypatch.setattr(server, "chat_limiter", ChatRateLimiter(limit=0, window_s=60.0))
+    transport = ASGITransport(app=server.app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        res = await ac.post(f"/api/chats/{chat['id']}/messages", json={"message": "hello"})
+    assert res.status_code == 429
 
 
-def test_extract_pdf_roundtrip(tmp_path):
-    import pymupdf
-
+def test_chunker_extract_and_chunk_pages_roundtrip(tmp_path):
     path = str(tmp_path / "t.pdf")
     doc = pymupdf.open()
-    page = doc.new_page()
-    page.insert_text((72, 72), "hello rsrch")
+    page1 = doc.new_page()
+    page1.insert_text((72, 72), "1. Introduction\n\nhello rsrch")
+    doc.new_page()  # blank page should yield no chunks
+    page3 = doc.new_page()
+    page3.insert_text((72, 72), "More details without a new heading.")
     doc.save(path)
     doc.close()
 
-    text, pages = server._extract_pdf(path)
-    assert pages == 1
-    assert "hello" in text
+    pages, count = chunker.extract_pdf_pages(path)
+    assert count == 3
+    chunks = chunker.chunk_pages(pages)
+    assert len(chunks) == 2
+    assert chunks[0]["page"] == 1
+    assert chunks[0]["section"] == "1. Introduction"
+    assert "hello" in chunks[0]["text"]
+    # Heading carries forward across pages until superseded
+    assert chunks[1]["page"] == 3
+    assert chunks[1]["section"] == "1. Introduction"
 
 
-def test_extract_pdf_missing_file_returns_empty():
-    text, pages = server._extract_pdf("/nonexistent/missing.pdf")
-    assert (text, pages) == ("", 1)
+def test_chunk_pages_splits_long_paragraphs_within_ceiling():
+    sentence = "Attention mechanisms scale smoothly. " * 12  # ~444 chars
+    long_page = (sentence + "\n\n") * 6
+    chunks = chunker.chunk_pages([long_page])
+    assert len(chunks) > 1
+    assert all(len(c["text"]) <= chunker.MAX_CHUNK_CHARS for c in chunks)
 
 
-def test_backfill_chunks_with_pending_pdf_does_not_raise(tmp_path, monkeypatch):
-    """Regression: a stray `return doc` (undefined name) made `_backfill_chunks`
-    raise NameError on every boot that had an unindexed PDF, aborting the
-    lifespan background task before it indexed anything."""
-    import asyncio
-    import database
-
+async def test_backfill_chunks_with_missing_pdf_does_not_raise(tmp_path, monkeypatch):
+    """Regression: unindexed docs with missing PDF files must not abort backfill."""
     monkeypatch.setattr(database, "DB_PATH", str(tmp_path / "backfill.db"))
-
-    async def run():
-        await database.init_db()
-        ws = f"ws_{uuid.uuid4().hex[:8]}"
-        doc = f"doc_{uuid.uuid4().hex[:8]}"
-        await database.create_workspace(ws, "W")
-        # file_path set but the file does not exist, so the loop reaches the
-        # end of the function and previously hit the stray `return doc`.
-        await database.create_document(
-            doc, ws, "d.pdf", note_title="T", tag="G",
-            file_path=str(tmp_path / "missing.pdf"), page_count=1,
-            extracted_text="", doc_type="pdf",
-        )
-        assert await database.get_unindexed_pdf_docs()
-        await server._backfill_chunks()  # must complete, not NameError
-
-    asyncio.run(run())
+    await database.init_db()
+    ws = f"ws_{uuid.uuid4().hex[:8]}"
+    doc = f"doc_{uuid.uuid4().hex[:8]}"
+    await database.create_workspace(ws, "W")
+    await database.create_document(
+        doc, ws, "d.pdf", note_title="T", tag="G",
+        file_path=str(tmp_path / "missing.pdf"), page_count=1,
+        extracted_text="", doc_type="pdf",
+    )
+    assert await database.get_unindexed_pdf_docs()
+    await server._backfill_chunks()

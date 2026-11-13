@@ -5,7 +5,7 @@ from ai.signatures import GroundedPaperQA
 class GroundedPaperQAModule(dspy.Module):
     """CoT QA over `GroundedPaperQA`. Pre-retrieved passages are passed directly via `context`."""
 
-    def __init__(self, document_ids: list[str] | None = None):
+    def __init__(self):
         super().__init__()
         self.cot = dspy.ChainOfThought(GroundedPaperQA)
 

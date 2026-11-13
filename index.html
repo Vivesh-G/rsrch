@@ -12,7 +12,7 @@
       // Apply persisted theme before first paint (no flash). Defaults to
       // dark via body class; stored value wins, else OS preference.
       try {
-        var t = localStorage.getItem('rschr-theme');
+        var t = localStorage.getItem('rsrch-theme');
         if (t === 'light' || (!t && window.matchMedia('(prefers-color-scheme: light)').matches)) {
           document.addEventListener('DOMContentLoaded', function () {
             document.body.classList.remove('dark');

@@ -26,11 +26,6 @@ def test_settings_is_frozen():
         config.settings.max_upload_bytes = 1
 
 
-def test_file_defaults_loaded_from_dotconfig():
-    assert config._FILE_DEFAULTS["MAX_UPLOAD_MB"] == "50"
-    assert config._FILE_DEFAULTS["CHAT_HISTORY_LIMIT"] == "20"
-
-
 def test_env_overrides_dotconfig(fresh_config):
     reloaded = fresh_config(CHAT_HISTORY_LIMIT="99")
     assert reloaded.settings.chat_history_limit == 99
@@ -38,8 +33,10 @@ def test_env_overrides_dotconfig(fresh_config):
 
 def test_dotconfig_value_used_when_no_env(fresh_config, monkeypatch):
     monkeypatch.delenv("CHAT_HISTORY_LIMIT", raising=False)
+    monkeypatch.delenv("MAX_UPLOAD_MB", raising=False)
     reloaded = fresh_config()
     assert reloaded.settings.chat_history_limit == 20
+    assert reloaded.settings.max_upload_bytes == 50 * 1024 * 1024
 
 
 def test_invalid_env_falls_back_to_default(fresh_config):
@@ -47,7 +44,10 @@ def test_invalid_env_falls_back_to_default(fresh_config):
     assert reloaded.settings.max_upload_bytes == 50 * 1024 * 1024
 
 
-def test_data_dir_override(fresh_config):
+def test_data_dir_override_and_assets_path(fresh_config):
     reloaded = fresh_config(RSRCH_DATA_DIR="/tmp/rsrch-custom-data")
     assert reloaded.settings.data_dir == Path("/tmp/rsrch-custom-data")
     assert str(reloaded.settings.db_path).endswith("rschr.db")
+    assert reloaded.settings.workspace_assets_dir("ws_123") == (
+        Path("/tmp/rsrch-custom-data") / "workspaces" / "ws_123" / "assets"
+    )

@@ -1,23 +1,24 @@
 import React, { useMemo, useState } from 'react';
 import type { Workspace } from '../types';
-import { docMatchesQuery } from '../utils/search';
-import { IconDoc, IconBook, IconTrash, IconClose, IconPencil } from './Icons';
+import { buildLoweredNotes, docMatchesQuery } from '../utils/search';
+import { getDocDisplayName, isLatexDoc } from '../utils/document';
+import { useFileDrop } from '../hooks/useFileDrop';
+import { InlineRenameInput } from './InlineRenameInput';
+import { IconDoc, IconBook, IconTrash, IconClose, IconPencil, IconLatex } from './Icons';
 
 interface WorkspaceOverviewProps {
   workspace?: Workspace;
   searchQuery: string;
   notesCache?: Record<string, string>;
   onAddPdf: () => void;
-  onDropFiles?: (files: FileList) => void;
+  onDropFiles?: (files: File[]) => void;
   onSelectDoc: (wsId: string, docId: string) => void;
-  onDeleteDoc?: (wsId: string, docId: string) => void;
+  onDeleteDoc?: (docId: string) => void;
   onDeleteWorkspace?: (wsId: string) => void;
   onRenameDoc?: (docId: string, title: string) => void;
   onClose?: () => void;
   dragHandle?: React.ReactNode;
 }
-
-const baseName = (n?: string) => (n || '').replace(/\.pdf$/i, '');
 
 const WorkspaceOverviewInner: React.FC<WorkspaceOverviewProps> = ({
   workspace,
@@ -32,30 +33,25 @@ const WorkspaceOverviewInner: React.FC<WorkspaceOverviewProps> = ({
   onClose,
   dragHandle,
 }) => {
-  const [isDraggingOver, setIsDraggingOver] = useState(false);
   const [renamingId, setRenamingId] = useState<string | null>(null);
-  const [renameValue, setRenameValue] = useState('');
-
-  const commitRename = (docId: string, fallback: string) => {
-    setRenamingId(null);
-    if (renameValue.trim() && renameValue.trim() !== fallback) {
-      onRenameDoc?.(docId, renameValue);
-    }
-  };
   const query = searchQuery.trim().toLowerCase();
   const docs = workspace?.docs || [];
+
+  const { dragActive: isDraggingOver, handleDrag, handleDrop } = useFileDrop((files) => {
+    onDropFiles?.(files);
+  });
 
   // Same predicate as the sidebar (name/title/tag/note body) so both views
   // agree. Safe to take notesCache: the overview is only visible when no
   // doc is open, i.e. exactly when no note keystrokes are happening.
+  const loweredNotes = useMemo(
+    () => (query ? buildLoweredNotes(notesCache) : {}),
+    [notesCache, query],
+  );
   const matchedDocs = useMemo(() => {
     if (!query) return docs;
-    const lowered = (id: string) => {
-      const v = notesCache?.[id];
-      return typeof v === 'string' ? v.toLowerCase() : undefined;
-    };
-    return docs.filter((d) => docMatchesQuery(d, query, lowered(d.id)));
-  }, [docs, query, notesCache]);
+    return docs.filter((d) => docMatchesQuery(d, query, loweredNotes[d.id]));
+  }, [docs, query, loweredNotes]);
 
   const docCount = docs.length;
 
@@ -64,16 +60,10 @@ const WorkspaceOverviewInner: React.FC<WorkspaceOverviewProps> = ({
       id="wsOverview"
       className={`ws-overview ${isDraggingOver ? 'drag-over' : ''}`}
       style={{ position: 'relative' }}
-      onDragEnter={(e) => { e.preventDefault(); setIsDraggingOver(true); }}
-      onDragOver={(e) => { e.preventDefault(); setIsDraggingOver(true); }}
-      onDragLeave={(e) => { e.preventDefault(); setIsDraggingOver(false); }}
-      onDrop={(e) => {
-        e.preventDefault();
-        setIsDraggingOver(false);
-        if (e.dataTransfer.files?.length && onDropFiles) {
-          onDropFiles(e.dataTransfer.files);
-        }
-      }}
+      onDragEnter={handleDrag}
+      onDragOver={handleDrag}
+      onDragLeave={handleDrag}
+      onDrop={handleDrop}
     >
       {isDraggingOver && (
         <div className="drop-hint">Drop PDF here to add to workspace</div>
@@ -125,64 +115,60 @@ const WorkspaceOverviewInner: React.FC<WorkspaceOverviewProps> = ({
 
       {matchedDocs.length > 0 ? (
         <div id="wsGrid" className="ws-grid">
-          {matchedDocs.map((d) => (
-            <div
-              key={d.id}
-              className="ws-card"
-              onClick={() => workspace && onSelectDoc(workspace.id, d.id)}
-            >
-              <button
-                className="card-delete-btn"
-                title={`Delete "${d.note_title || baseName(d.name)}"`}
-                onClick={(e) => {
-                  e.stopPropagation();
-                  if (workspace) {
-                    onDeleteDoc?.(workspace.id, d.id);
-                  }
-                }}
-                type="button"
+          {matchedDocs.map((d) => {
+            const displayName = getDocDisplayName(d);
+            return (
+              <div
+                key={d.id}
+                className="ws-card"
+                onClick={() => workspace && onSelectDoc(workspace.id, d.id)}
               >
-                <IconClose size={12} />
-              </button>
-              {onRenameDoc && renamingId !== d.id && (
                 <button
-                  className="card-rename-btn"
-                  title={`Rename "${d.note_title || baseName(d.name)}"`}
+                  className="card-delete-btn"
+                  title={`Delete "${displayName}"`}
                   onClick={(e) => {
                     e.stopPropagation();
-                    setRenameValue(d.note_title || baseName(d.name));
-                    setRenamingId(d.id);
+                    if (workspace) {
+                      onDeleteDoc?.(d.id);
+                    }
                   }}
                   type="button"
                 >
-                  <IconPencil size={12} />
+                  <IconClose size={12} />
                 </button>
-              )}
-              <div className="thumb">
-                <IconDoc size={32} />
+                {onRenameDoc && renamingId !== d.id && (
+                  <button
+                    className="card-rename-btn"
+                    title={`Rename "${displayName}"`}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setRenamingId(d.id);
+                    }}
+                    type="button"
+                  >
+                    <IconPencil size={12} />
+                  </button>
+                )}
+                <div className="thumb">
+                  {isLatexDoc(d) ? <IconLatex size={32} /> : <IconDoc size={32} />}
+                </div>
+                {renamingId === d.id ? (
+                  <InlineRenameInput
+                    className="inline-rename-input"
+                    initialValue={displayName}
+                    onCommit={(nextTitle) => {
+                      setRenamingId(null);
+                      onRenameDoc?.(d.id, nextTitle);
+                    }}
+                    onCancel={() => setRenamingId(null)}
+                  />
+                ) : (
+                  <b>{displayName}</b>
+                )}
+                <small>{isLatexDoc(d) ? 'LaTeX • Code' : `${d.tag || 'PDF'} • Notes`}</small>
               </div>
-              {renamingId === d.id ? (
-                <input
-                  className="inline-rename-input"
-                  value={renameValue}
-                  autoFocus
-                  onFocus={(e) => e.target.select()}
-                  onChange={(e) => setRenameValue(e.target.value)}
-                  onBlur={() => commitRename(d.id, d.note_title || baseName(d.name))}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
-                    if (e.key === 'Escape') setRenamingId(null);
-                  }}
-                  onClick={(e) => e.stopPropagation()}
-                  maxLength={120}
-                  placeholder="Enter title"
-                />
-              ) : (
-                <b>{d.note_title || baseName(d.name)}</b>
-              )}
-              <small>{d.tag || 'PDF'} • Notes</small>
-            </div>
-          ))}
+            );
+          })}
         </div>
       ) : query ? (
         <div id="wsEmpty" className="panel-empty">
@@ -213,22 +199,5 @@ const WorkspaceOverviewInner: React.FC<WorkspaceOverviewProps> = ({
   );
 };
 
-export const WorkspaceOverview = React.memo(
-  WorkspaceOverviewInner,
-  (prev, next) => {
-    return (
-      prev.workspace === next.workspace &&
-      prev.searchQuery === next.searchQuery &&
-      prev.notesCache === next.notesCache &&
-      prev.onClose === next.onClose &&
-      prev.onAddPdf === next.onAddPdf &&
-      prev.onDropFiles === next.onDropFiles &&
-      prev.onSelectDoc === next.onSelectDoc &&
-      prev.onDeleteDoc === next.onDeleteDoc &&
-      prev.onDeleteWorkspace === next.onDeleteWorkspace &&
-      prev.onRenameDoc === next.onRenameDoc &&
-      prev.dragHandle === next.dragHandle
-    );
-  }
-);
+export const WorkspaceOverview = React.memo(WorkspaceOverviewInner);
 
